@@ -1,0 +1,13 @@
+.vscode
+pico/build
+pico/bootrom
+pico/c/disk.h
+pico/c/bootrom.h
+rom/build
+rom/release
+pcb/SVI-3x8-PicoExpander-backups
+pcb/fp-info-cache
+pcb/gerber.zip
+pcb/*.lck
+wifi-credentials.config
+release/wifi-credentials.bin
