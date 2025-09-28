@@ -36,7 +36,7 @@ if (!command) {
 
 let setupUdpServer = (onHanshake) => {
     udpServer = dgram.createSocket('udp4');
-    
+
     udpServer.on('listening', () => {
         const address = udpServer.address();
         console.log("Waiting for SVI-3x8 PicoExpander...");
@@ -67,7 +67,7 @@ const sendDisk = (filename) => {
         console.error("Disk image file must be exactly 172032 or 346112 bytes");
         process.exit(1);
     }
-        
+
     setupUdpServer((remote) => {
         const tcpClient = new net.Socket();
 
@@ -140,8 +140,8 @@ const sendDisk = (filename) => {
 
 const sendRom = (filename) => {
     let romData = fs.readFileSync(filename);
-    if (romData.length !== 16384 && romData.length !== 32768 && romData.length !== 65536) {
-        console.error("ROM file must be exactly 16384, 32768 or 65536 bytes, now ${romData.length} bytes");
+    if (option1 !== '--ignore-size' && (romData.length !== 16384 && romData.length !== 32768 && romData.length !== 65536)) {
+        console.error(`ROM file must be exactly 16384, 32768 or 65536 bytes, now ${romData.length} bytes`);
         process.exit(1);
     }
 
@@ -150,7 +150,7 @@ const sendRom = (filename) => {
         romData.copy(paddedBuffer, 0, 0, romData.length);
         romData = paddedBuffer;
     }
-    
+
     setupUdpServer((remote) => {
         const tcpClient = new net.Socket();
         let buffer = Buffer.alloc(0);
@@ -308,7 +308,7 @@ let sendCas = (filename) => {
         console.error("Max supported CAS size is 524288 bytes");
         process.exit(1);
     }
-    
+
     setupUdpServer((remote) => {
         const tcpClient = new net.Socket();
 
