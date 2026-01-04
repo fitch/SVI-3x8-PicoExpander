@@ -88,4 +88,6 @@ For detailed documentation, see the `doc/` directory:
 | [save-state-format.md](doc/save-state-format.md) | Save state file format specification |
 | [development.md](doc/development.md) | Building the ROM and development setup |
 
+## License
 
+Detailed licensing information is documented within the included [LICENSE](LICENSE) file.
