@@ -13,6 +13,9 @@ The device emulates (when plugged into the SVI-3x8 expansion port):
  - **Save states** to save computer state and load it at later time, making it possible to save your progress in a game and continue later
  - **Remote launch** allowing you to pick up a game image from PC/Mac and launch it from the SVI via Wi-Fi
 
+![PicoExpander](photos/picoexpander.jpg)
+![SVI](photos/svi.jpg)
+
 ## Limitations
 
 Limitations of the current software (1.4.2):
