@@ -49,6 +49,11 @@ class FileTypeCode {
         if (type === 'savestate' || type === 'save-state') {
             return 0x14; // 0b00010100 (main type 4, subtype 1)
         }
+
+        // HDD image files - main type 5, subtype 1
+        if (type === 'hdd') {
+            return 0x15; // 0b00010101 (main type 5, subtype 1)
+        }
         
         return 0x00; // Unknown type
     }

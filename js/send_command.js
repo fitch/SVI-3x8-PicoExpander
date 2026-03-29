@@ -9,7 +9,7 @@ const Bk4xSaver = require('./lib/commands/Bk4xSaver');
 const BootCommands = require('./lib/commands/BootCommands');
 const LogCommand = require('./lib/commands/LogCommand');
 
-console.log("SVI-3x8 PicoExpander Command Center 1.4.2 - (c) 2025 MAG-4");
+console.log("SVI-3x8 PicoExpander Command Center 1.4.3 - (c) 2026 MAG-4");
 
 const command = process.argv[2];
 const filename = process.argv[3];

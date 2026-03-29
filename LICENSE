@@ -1,4 +1,4 @@
-SVI-3x8 PicoExpander version 1.4.2
+SVI-3x8 PicoExpander version 1.4.3
 
 Copyright (c) 2026 Markus Rautopuro (Pico C firmware, server scripts and hardware design)
 Copyright (c) 2026 Timo Soilamaa (Z80 assembly code)
@@ -30,6 +30,27 @@ You're free to use the Kicad project, the schematics and the PCB layout in your 
 Redistribution of the PCB board schematics or the Kicad project (files in the pcb directory) is not permitted without a written permission from the author.
 
 If you want to use the PCB in commercial purposes, you're not allowed to do that without a written permission from the author. As an exception, making a small batch of boards, using some of the boards for personal projects and selling the remaining boards is permitted.
+
+
+License for Arkos Tracker 3 replayer (MIT License):
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 License for the font data (embedded in release/*.uf2):

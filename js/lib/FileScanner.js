@@ -129,7 +129,14 @@ class FileScanner {
                 
             case '.sta':
                 return StaFormat.validate(buffer, fileSize);
-                
+
+            case '.hdd':
+                // HDD images: must be a multiple of 256 bytes (sector size)
+                if (fileSize < 256 || fileSize % 256 !== 0) {
+                    return { valid: false, error: 'HDD image must be a multiple of 256 bytes', type: 'hdd' };
+                }
+                return { valid: true, error: null, type: 'hdd', info: ` (${Math.floor(fileSize / 256)} sectors)` };
+
             default:
                 return { 
                     valid: false, 

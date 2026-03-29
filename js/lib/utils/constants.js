@@ -9,7 +9,8 @@ const SUPPORTED_EXTENSIONS = {
     '.dsk': 'disk',
     '.dmk': 'disk-dmk',
     '.bin': 'rom',
-    '.sta': 'savestate'
+    '.sta': 'savestate',
+    '.hdd': 'hdd'
 };
 
 // Valid DSK file sizes in bytes

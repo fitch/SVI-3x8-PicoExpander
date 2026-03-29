@@ -12,13 +12,14 @@ The device emulates (when plugged into the SVI-3x8 expansion port):
  - **Support for 64 kB ROM game cartridges**, without using the game cartridge slot and finally fixing the 64 kB ROM support in SVI-328 MKII devices
  - **Save states** to save computer state and load it at later time, making it possible to save your progress in a game and continue later
  - **Remote launch** allowing you to pick up a game image from PC/Mac and launch it from the SVI via Wi-Fi
+ - **Hard disk emulation** with server-based network backing, allowing CP/M hard disk images to be served over Wi-Fi
 
 ![PicoExpander](photos/picoexpander.jpg)
 ![SVI](photos/svi.jpg)
 
 ## Limitations
 
-Limitations of the current software (1.4.2):
+Limitations of the current software (1.4.3):
  - Supports only one disk drive, two-disk drive support coming up
 
 ## The project
@@ -39,10 +40,11 @@ Also, note that device is a prototype and therefore has very limited warranty: y
 
 When you've built the PCB you can flash the .UF2 file provided in the [release](release/) directory. For the assembled devices, the Pico has already been flashed with the latest firmware.
 
-1. Hold the **BOOTSEL** button on the Pico W while connecting it to your computer via USB
-2. The Pico will appear as a USB mass storage device
-3. Copy the `.uf2` firmware file from the `release/` directory to the Pico USB drive. Wait until Pico disconnects (displays Disk Not Ejected Properly in macOS) and the green LED light turns on to signal that the firmware booted correctly.
-4. Finally, remove the USB cable.
+1. Disconnect PicoExpander from SVI
+2. Hold the **BOOTSEL** button on the Pico W while connecting it to your computer via USB
+3. The Pico will appear as a USB mass storage device
+4. Copy the `.uf2` firmware file from the `release/` directory to the Pico USB drive. Wait until Pico disconnects (displays Disk Not Ejected Properly in macOS) and the green LED light turns on to signal that the firmware booted correctly.
+5. Finally, remove the USB cable.
 
 ### 2. Install Node.js
 
@@ -60,7 +62,17 @@ nvm use
 **Windows:**
 Download and install from [nodejs.org](https://nodejs.org/)
 
-### 3. Run the File Server
+### 3. Boot the SVI with PicoExpander
+
+Place the PicoExpander into the expansion port of the SVI-318 or SVI-328. Boot SVI up.
+
+You can return to the main menu in two ways:
+- Press the **RESET button** on the PicoExpander briefly
+- Press **CTRL + SHIFT + LEFT GRAPH + RIGHT GRAPH** simultaneously on the keyboard
+
+If you need to reset the SVI, press the RESET button for at least 3 seconds.
+
+### 4. Run the File Server
 
 Start the server with a directory containing your disk images, ROMs, and cassette files:
 
@@ -83,10 +95,16 @@ For detailed documentation, see the `doc/` directory:
 |----------|-------------|
 | [server.md](doc/server.md) | File server usage and interactive commands |
 | [send_command.md](doc/send_command.md) | Command-line tool for scripting and automation |
+| [hard-disk-emulation.md](doc/hard-disk-emulation.md) | Hard disk emulation setup and usage |
 | [boot-sequence.md](doc/boot-sequence.md) | Technical details of the PicoExpander boot process |
 | [io-ports.md](doc/io-ports.md) | I/O port reference for developers |
 | [save-state-format.md](doc/save-state-format.md) | Save state file format specification |
 | [development.md](doc/development.md) | Building the ROM and development setup |
+| [pcb/README.md](pcb/README.md) | PCB design files, schematics overview, and parts list |
+
+## Release Notes
+
+See the latest changes in [v1.4.3 release notes](release/release-notes-1.4.3.md).
 
 ## License
 

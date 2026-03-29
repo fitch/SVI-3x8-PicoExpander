@@ -6,9 +6,9 @@ const FileSelector = require('./FileSelector');
 const LogAnalyzer = require('../commands/LogAnalyzer');
 const BootCommands = require('../commands/BootCommands');
 const RomLoader = require('../commands/RomLoader');
-const Bk4xLoader = require('../commands/Bk4xLoader');
 const Bk4xSaver = require('../commands/Bk4xSaver');
 const BiosSaver = require('../commands/BiosSaver');
+const DiskSaver = require('../commands/DiskSaver');
 const SaveStateSaver = require('../commands/SaveStateSaver');
 const DiskLoader = require('../commands/DiskLoader');
 const CasLoader = require('../commands/CasLoader');
@@ -97,17 +97,6 @@ class CommandHandler {
                     Prompt.show();
                     break;
                     
-                case 'C':
-                    console.clear();
-                    console.log('File Server Running...');
-                    if (server.picoConnection && server.picoConnection.connected) {
-                        console.log(`Connected to PicoExpander at ${server.picoConnection.address.address}:${server.picoConnection.address.port}`);
-                    }
-                    console.log('Press H for help\n');
-                    Display.printFilesByType(server.files);
-                    Prompt.show();
-                    break;
-                    
                 case 'R':
                     console.log('Rescanning directory...');
                     server.scanDirectory();
@@ -129,8 +118,12 @@ class CommandHandler {
                     break;
                     
                 case 'H':
-                    Display.showHelp();
+                    Display.showHelp(server);
                     Prompt.show();
+                    break;
+
+                case 'U':
+                    CommandHandler._unloadHdd(server);
                     break;
                     
                 case 'L':
@@ -147,10 +140,6 @@ class CommandHandler {
                     
                 case '1':
                     CommandHandler._loadRom(server);
-                    break;
-                    
-                case '2':
-                    CommandHandler._loadBk4x(server);
                     break;
                     
                 case '3':
@@ -175,6 +164,10 @@ class CommandHandler {
                     
                 case '8':
                     CommandHandler._saveSaveState(server);
+                    break;
+                
+                case '9':
+                    CommandHandler._saveDisk(server);
                     break;
                     
                 case 'Q':
@@ -248,41 +241,6 @@ class CommandHandler {
     }
     
     /**
-     * Load BK4X file
-     * @private
-     */
-    static _loadBk4x(server) {
-        if (!server.picoConnection || !server.picoConnection.connected) {
-            Prompt.print('Not connected to PicoExpander');
-            Prompt.show();
-            return;
-        }
-        
-        CommandHandler.disable();
-        
-        FileSelector.selectFile(server.files, 'rom', async (filePath, fileInfo) => {
-            try {
-                await Bk4xLoader.load(filePath, server.picoConnection.address, () => {
-                    Prompt.print('BK4X load complete');
-                    CommandHandler.enable();
-                    Prompt.show();
-                }, (err) => {
-                    Prompt.print(`BK4X load error: ${err.message}`);
-                    CommandHandler.enable();
-                    Prompt.show();
-                });
-            } catch (err) {
-                Prompt.print(`Error: ${err.message}`);
-                CommandHandler.enable();
-                Prompt.show();
-            }
-        }, () => {
-            CommandHandler.enable();
-            Prompt.show();
-        });
-    }
-    
-    /**
      * Save BK4X RAM4 data
      * @private
      */
@@ -326,6 +284,55 @@ class CommandHandler {
         });
     }
     
+    /**
+     * Save disk image
+     * @private
+     */
+    static _saveDisk(server) {
+        if (!server.picoConnection || !server.picoConnection.connected) {
+            Prompt.print('Not connected to PicoExpander');
+            Prompt.show();
+            return;
+        }
+        
+        CommandHandler.disable();
+        
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+        
+        rl.question('Enter disk image filename (default: saved_disk.dsk): ', (answer) => {
+            rl.close();
+            CommandHandler.enable();
+            
+            let filename = answer.trim() || 'saved_disk.dsk';
+            
+            if (!filename.endsWith('.dsk')) {
+                filename += '.dsk';
+            }
+            
+            const fullPath = require('path').join(server.directory, filename);
+            
+            Prompt.print(`Saving disk image to ${filename}...`, false);
+            
+            DiskSaver.save(fullPath, server.picoConnection.address, () => {
+                Prompt.print('Disk image save complete');
+                Prompt.show();
+            }, (err) => {
+                Prompt.print(`Disk save error: ${err.message}`);
+                Prompt.show();
+            });
+        });
+        
+        rl.on('SIGINT', () => {
+            console.log('\nCancelled.\n');
+            rl.close();
+            CommandHandler.enable();
+            Prompt.show();
+        });
+    }
+
     /**
      * Save machine state (save state capture)
      * @private
@@ -469,6 +476,36 @@ class CommandHandler {
         });
     }
     
+    /**
+     * Unload HDD image and notify Pico
+     * @private
+     */
+    static _unloadHdd(server) {
+        const conn = server.picoConnection;
+        if (!conn || !conn.hddImage) {
+            console.log('HDD: No image loaded');
+            Prompt.show();
+            return;
+        }
+
+        // Close file descriptor
+        const fs = require('fs');
+        if (conn.hddFd !== null && conn.hddFd !== undefined) {
+            try { fs.closeSync(conn.hddFd); } catch (e) { /* ignore */ }
+            conn.hddFd = null;
+        }
+        conn.hddImage = null;
+
+        // Send HI with 0 total LBAs to clear HDD on Pico
+        if (conn.connected && conn.tcpClient) {
+            const { createCommandBuffer } = require('../network/ProtocolUtils');
+            conn.tcpClient.write(createCommandBuffer('HI', 0, 0));
+        }
+
+        console.log('HDD: Image unloaded');
+        Prompt.show();
+    }
+
     /**
      * Request logs from Pico
      * @private

@@ -76,12 +76,13 @@ class Display {
             cassette: 0,
             disk: 0,
             rom: 0,
-            savestate: 0
+            savestate: 0,
+            hdd: 0
         };
-        
+
         for (const [filePath, fileInfo] of filesMap.entries()) {
             const type = fileInfo.type;
-            
+
             if (type === 'cassette') {
                 categories.cassette++;
             } else if (type && type.startsWith('disk')) {
@@ -90,6 +91,8 @@ class Display {
                 categories.rom++;
             } else if (type === 'savestate') {
                 categories.savestate++;
+            } else if (type === 'hdd') {
+                categories.hdd++;
             }
         }
         
@@ -97,9 +100,10 @@ class Display {
         
         for (const [category, count] of Object.entries(categories)) {
             if (count > 0) {
-                const label = category === 'savestate' ? 'Save states' : 
+                const label = category === 'savestate' ? 'Save states' :
+                    category === 'hdd' ? 'HDD' :
                     category.charAt(0).toUpperCase() + category.slice(1);
-                const imageText = category === 'savestate' ? '' : 
+                const imageText = category === 'savestate' ? '' :
                     (count === 1 ? ' image' : ' images');
                 console.log(`  ${label}: ${count}${imageText}`);
             }
@@ -116,7 +120,7 @@ class Display {
      */
     static printInvalidFiles(invalidFilesMap) {
         if (invalidFilesMap.size === 0) {
-            console.log('\nNo invalid files found.\n');
+            console.log('No invalid files found.');
             return;
         }
         
@@ -134,28 +138,38 @@ class Display {
     /**
      * Show help/commands
      */
-    static showHelp() {
+    static showHelp(server) {
         console.log('\n=== Available Commands ===');
         console.log('  D - Display catalog (show all files grouped by type)');
-        console.log('  C - Clear screen and redisplay catalog');
         console.log('  R - Rescan directory (force refresh)');
         console.log('  I - Show invalid files');
         console.log('  S - Search files (by name, metadata, or contents)');
         console.log('');
         console.log('  1 - Load ROM file');
-        console.log('  2 - Load BK4X ROM file');
         console.log('  3 - Save BK4X RAM4 data');
         console.log('  4 - Load Disk image');
         console.log('  5 - Load CAS tape file');
         console.log('  6 - Boot to Launcher');
         console.log('  7 - Save BIOS data');
         console.log('  8 - Save machine state (save state capture)');
+        console.log('  9 - Save Disk image');
         console.log('');
+        if (server && server.picoConnection && server.picoConnection.hddImage) {
+            console.log('  U - Unload HDD image');
+        }
         console.log('  L - Request both logs from PicoExpander');
         console.log('  T - Request text log from PicoExpander');
         console.log('  W - Request hardware log from PicoExpander');
         console.log('  H - Show this help message');
         console.log('  Q - Quit server');
+
+        if (server && server.picoConnection && server.picoConnection.hddImage) {
+            const sectors = Math.floor(server.picoConnection.hddImage.length / 256);
+            const sizeMB = (server.picoConnection.hddImage.length / (1024 * 1024)).toFixed(1);
+            console.log(`\n  HDD: Image loaded (${sectors} sectors, ${sizeMB} MB)`);
+        } else {
+            console.log('\n  HDD: No image loaded');
+        }
     }
 }
 

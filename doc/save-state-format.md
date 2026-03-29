@@ -40,21 +40,20 @@ The bank configuration byte at offset 23 specifies which memory banks are includ
 
 After the 32-byte header, the data is stored with RAM4 first, followed by banks in order according to the bank configuration byte:
 
-1. **RAM4 area (0xB000-0xF03F)**: 16,448 bytes - Always present first
-2. **BK01**: 32,768 bytes - Present if bit 0 is set
-3. **BK02**: 32,768 bytes - Present if bit 1 is set
-4. **BK11**: 32,768 bytes - Present if bit 2 is set
-5. **BK12**: 32,768 bytes - Present if bit 3 is set
-6. **BK21**: 32,768 bytes - Present if bit 4 is set
-7. **BK22**: 32,768 bytes - Present if bit 5 is set
-8. **BK31**: 32,768 bytes - Present if bit 6 is set
-9. **BK32**: 32,768 bytes - Present if bit 7 is set
-
-Banks are stored in ascending order (BK01, BK02, BK11, BK12, BK21, BK22, BK31, BK32), but only those indicated by the bank configuration byte are included.
+1. **VRAM (0x0000-0x3FFF)**: 16,384 bytes - Always present
+2. **Device register area**: 64 bytes - Always present
+3. **BK01**: 32,768 bytes - Present if bit 0 is set
+4. **BK02**: 32,768 bytes - Present if bit 1 is set
+5. **BK11**: 32,768 bytes - Present if bit 2 is set
+6. **BK12**: 32,768 bytes - Present if bit 3 is set
+7. **BK21**: 32,768 bytes - Present if bit 4 is set
+8. **BK22**: 32,768 bytes - Present if bit 5 is set
+9. **BK31**: 32,768 bytes - Present if bit 6 is set
+10. **BK32**: 32,768 bytes - Present if bit 7 is set
 
 ## Example File Sizes
 
-The file size is calculated as: `32 + 16,448 + (number_of_banks × 32,768)` bytes.
+The file size is calculated as: `32 + 16,384 + 64 + (number_of_banks × 32,768)` bytes.
 
 | Banks | Header | Data | Total File Size |
 |-------|--------|------|-----------------|
@@ -66,5 +65,3 @@ The file size is calculated as: `32 + 16,448 + (number_of_banks × 32,768)` byte
 ## Usage
 
 From the server.js interactive interface, press **0** to capture the current machine state. The save state will be saved to `saved_state.sta` in the current directory.
-
-The RAM4 area (0xB000-0xF03F) is always included as it contains important launcher and system state that may be needed for proper restoration.

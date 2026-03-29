@@ -42,22 +42,31 @@ class Bk4xLoader {
         console.log("Connected. Sending BK4X upload command...");
         client.write(createCommandBuffer("LL", romData.length, romData.length));
 
+        let state = 'waiting_for_OK';
+
         client.onData(() => {
             try {
                 const response = client.readCommand();
                 if (!response) return;
 
-                if (response.cmd === 'OK') {
+                if (state === 'waiting_for_OK' && response.cmd === 'OK') {
                     console.log("Received OK. Sending ROM data...");
                     client.write(romData);
-                    console.log("ROM image sent");
-                    client.end();
-                } else if (response.cmd === 'EC') {
+                    console.log("ROM image sent, waiting for completion...");
+                    state = 'waiting_for_FI';
+                } else if (state === 'waiting_for_OK' && response.cmd === 'EC') {
                     console.error("Bk4x load failed - another command is in progress. Please try again.");
                     client.end();
-                    reject(new Error('Command in progress'));
+                    if (onError) onError(new Error('Command in progress'));
+                } else if (state === 'waiting_for_FI' && response.cmd === 'FI') {
+                    console.log("BK4X upload finished successfully.");
+                    client.end();
                 } else if (response.cmd === 'ER') {
                     console.error("Error response received, aborting...");
+                    client.end();
+                    if (onError) onError(new Error('Error response'));
+                } else {
+                    console.error(`Unexpected command '${response.cmd}' in state '${state}'`);
                     client.end();
                 }
             } catch (err) {

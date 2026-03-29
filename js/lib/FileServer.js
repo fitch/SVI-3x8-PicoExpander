@@ -123,16 +123,14 @@ class FileServer {
                 this.files.set(filePath, result.fileInfo);
                 
                 if (hasChanged && !silent) {
-                    Prompt.clear();
-                    console.log(`[+] ${result.fileInfo.relativePath} (${result.fileInfo.type}${result.fileInfo.info})`);
-                    Prompt.show();
+                    Prompt.print(`[+] ${result.fileInfo.relativePath} (${result.fileInfo.type}${result.fileInfo.info})`);
+                    this._notifyPicoFileListChanged();
                 }
             } else {
                 this.files.set(filePath, result.fileInfo);
                 if (!silent) {
-                    Prompt.clear();
-                    console.log(`[+] ${result.fileInfo.relativePath} (${result.fileInfo.type}${result.fileInfo.info})`);
-                    Prompt.show();
+                    Prompt.print(`[+] ${result.fileInfo.relativePath} (${result.fileInfo.type}${result.fileInfo.info})`);
+                    this._notifyPicoFileListChanged();
                 }
             }
         } else if (result.error) {
@@ -145,9 +143,7 @@ class FileServer {
             });
             
             if (!silent) {
-                Prompt.clear();
-                console.log(`[?] ${relativePath} - ${result.error}`);
-                Prompt.show();
+                Prompt.print(`[?] ${relativePath} - ${result.error}`);
             }
         }
     }
@@ -157,21 +153,34 @@ class FileServer {
      * @private
      */
     _removeFile(filePath) {
+        let removed = false;
         const fileInfo = this.files.get(filePath);
         
         if (fileInfo) {
             this.files.delete(filePath);
-            Prompt.clear();
-            console.log(`[-] ${fileInfo.relativePath}`);
-            Prompt.show();
+            Prompt.print(`[-] ${fileInfo.relativePath}`);
+            removed = true;
         }
         
         const invalidInfo = this.invalidFiles.get(filePath);
         if (invalidInfo) {
             this.invalidFiles.delete(filePath);
-            Prompt.clear();
-            console.log(`[-] ${invalidInfo.relativePath}`);
-            Prompt.show();
+            Prompt.print(`[-] ${invalidInfo.relativePath}`);
+            removed = true;
+        }
+
+        if (removed) {
+            this._notifyPicoFileListChanged();
+        }
+    }
+
+    /**
+     * Notify the Pico that the file list has changed
+     * @private
+     */
+    _notifyPicoFileListChanged() {
+        if (this.picoConnection && this.picoConnection.connected) {
+            this.picoConnection.notifyFileListChanged();
         }
     }
 

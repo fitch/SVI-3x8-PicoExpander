@@ -13,6 +13,7 @@ const FILTER_TAPE = 1;        // 0b00000001 - Filter only tape images
 const FILTER_ROM = 2;         // 0b00000010 - Filter only ROM images
 const FILTER_DISK = 3;        // 0b00000011 - Filter only disk images
 const FILTER_SAVE_STATE = 4;  // 0b00000100 - Filter only save states
+const FILTER_HDD = 5;        // 0b00000101 - Filter only HDD images
 
 /**
  * Manages persistent connection to SVI-3x8 PicoExpander
@@ -27,13 +28,7 @@ class PicoConnection {
         this.tcpClient = null;
         this.reconnectCallback = null;
         this.fileTypeFilter = FILTER_NONE;  // Current file type filter
-        
-        // Ping/pong mechanism
-        this.pingInterval = null;
-        this.pingTimeout = null;
-        this.awaitingPong = false;
         this.targetIdentifier = null;  // Identifier of the Pico we want to reconnect to
-        this.commandInProgress = false;  // Track when a command is in progress (skip pings)
     }
 
     /**
@@ -66,13 +61,11 @@ class PicoConnection {
             
             this.tcpClient.onClose(() => {
                 if (!this.isConnected) {
-                    // Already handled by ping timeout or disconnect
                     return;
                 }
                 Prompt.print('TCP connection closed unexpectedly.');
                 this.isConnected = false;
                 this.tcpClient = null;
-                this._stopPingInterval();
                 
                 // Trigger internal reconnection to the same Pico
                 if (this.targetIdentifier) {
@@ -96,9 +89,6 @@ class PicoConnection {
             
             // Store the identifier for reconnection
             this.targetIdentifier = this.picoAddress.identifier;
-            
-            // Start ping/pong heartbeat
-            this._startPingInterval();
 
             this._sendInitialFileChunk();
             
@@ -120,7 +110,25 @@ class PicoConnection {
             const response = this.tcpClient.readCommand();
             if (!response) return;
 
-            if (response.cmd === 'GF') {
+            if (response.cmd === 'FR') {
+                // File Read request: header already consumed, pad contains offset + file_number + length
+                const header = Buffer.alloc(10);
+                header.write('FR');
+                response.pad.copy(header, 2, 0, 8);
+                this._handleFR(header);
+                return;
+            } else if (response.cmd === 'FW') {
+                // File Write request: header + 256 bytes payload
+                const header = Buffer.alloc(10);
+                header.write('FW');
+                response.pad.copy(header, 2, 0, 8);
+                const length = header.readUInt16BE(8);
+                const payload = this.tcpClient.readBytes(length);
+                if (payload) {
+                    this._handleFW(header, payload);
+                }
+                return;
+            } else if (response.cmd === 'GF') {
                 // Read the file index from the padding bytes (bytes 2-3 of the command)
                 const fileIndex = (response.pad[0] << 8) | response.pad[1];
                 
@@ -181,109 +189,16 @@ class PicoConnection {
             } else if (response.cmd === 'SF') {
                 const filterValue = response.pad[0];
                 this.fileTypeFilter = filterValue;
-                const filterNames = ['None', 'Tape', 'ROM', 'Disk', 'Save State'];
+                const filterNames = ['None', 'Tape', 'ROM', 'Disk', 'Save State', 'HDD'];
                 const filterName = filterNames[filterValue] || `Unknown (${filterValue})`;
                 // Prompt.print(`File type filter set to: ${filterName}`);
                 
                 // Send updated file chunk (which includes file count in the header)
                 this._sendFileChunk(0);
-            } else if (response.cmd === 'PO') {
-                // Pong response received - connection is alive
-                this._handlePongResponse();
             }
         } catch (err) {
             Prompt.print(`Error handling Pico request: ${err.message}`);
         }
-    }
-
-    /**
-     * Start the ping interval to check connection health
-     * @private
-     */
-    _startPingInterval() {
-        this._stopPingInterval();  // Clear any existing interval
-        
-        this.pingInterval = setInterval(() => {
-            this._sendPing();
-        }, 1000);  // Send ping every 1 second
-    }
-
-    /**
-     * Stop the ping interval
-     * @private
-     */
-    _stopPingInterval() {
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
-        }
-        if (this.pingTimeout) {
-            clearTimeout(this.pingTimeout);
-            this.pingTimeout = null;
-        }
-        this.awaitingPong = false;
-    }
-
-    /**
-     * Send a ping command to Pico
-     * @private
-     */
-    _sendPing() {
-        if (!this.isConnected || !this.tcpClient || this.awaitingPong || this.commandInProgress) {
-            return;
-        }
-
-        try {
-            const cmd = createCommandBuffer('PI', 0, 0);  // PI = Ping
-            this.tcpClient.write(cmd);
-            this.awaitingPong = true;
-
-            // Set timeout for pong response - if no response in 1 second, assume disconnected
-            this.pingTimeout = setTimeout(() => {
-                if (this.awaitingPong) {
-                    Prompt.print('Ping timeout - PicoExpander not responding');
-                    this._handlePingTimeout();
-                }
-            }, 1000);
-        } catch (err) {
-            Prompt.print(`Error sending ping: ${err.message}`);
-            this._handlePingTimeout();
-        }
-    }
-
-    /**
-     * Handle pong response from Pico
-     * @private
-     */
-    _handlePongResponse() {
-        if (this.pingTimeout) {
-            clearTimeout(this.pingTimeout);
-            this.pingTimeout = null;
-        }
-        this.awaitingPong = false;
-    }
-
-    /**
-     * Handle ping timeout - connection is assumed lost
-     * @private
-     */
-    _handlePingTimeout() {
-        this._stopPingInterval();
-        this.isConnected = false;
-        
-        if (this.tcpClient) {
-            try {
-                // Use destroy to forcefully close and remove listeners
-                // This prevents lingering TCP timeout errors
-                this.tcpClient.destroy();
-            } catch (e) {
-                // Ignore errors on cleanup
-            }
-            this.tcpClient = null;
-        }
-        
-        // Trigger reconnection to the same Pico (by identifier)
-        this._reconnectToSamePico();
     }
 
     /**
@@ -337,13 +252,11 @@ class PicoConnection {
 
                 this.tcpClient.onClose(() => {
                     if (!this.isConnected) {
-                        // Already handled by ping timeout or disconnect
                         return;
                     }
                     Prompt.print('TCP connection closed unexpectedly.');
                     this.isConnected = false;
                     this.tcpClient = null;
-                    this._stopPingInterval();
                     
                     // Trigger reconnection to the same Pico
                     if (this.targetIdentifier) {
@@ -364,9 +277,6 @@ class PicoConnection {
 
                 this.isConnected = true;
                 this.isReconnecting = false;
-
-                // Restart ping interval
-                this._startPingInterval();
 
                 this._sendInitialFileChunk();
             } catch (err) {
@@ -402,6 +312,23 @@ class PicoConnection {
         try {
             // Prompt.print('Sending initial file list to Pico...');
             this._sendFileChunk(0);
+
+            // Re-send HDD image notification if an image is loaded
+            if (this.hddImage) {
+                const totalLBAs = Math.floor(this.hddImage.length / 256);
+                this.tcpClient.write(createCommandBuffer('HI', totalLBAs, 0));
+
+                // Push sector 0 (boot sector)
+                const sector0 = Buffer.alloc(10 + 256);
+                sector0.write('FS');
+                sector0.writeUInt32BE(0, 2);
+                sector0.writeUInt16BE(0, 6);
+                sector0.writeUInt16BE(256, 8);
+                this.hddImage.copy(sector0, 10, 0, 256);
+                this.tcpClient.write(sector0);
+
+                Prompt.print(`HDD: Re-mounted (${totalLBAs} sectors)`);
+            }
         } catch (err) {
             Prompt.print(`Error sending initial file chunk: ${err.message}`);
         }
@@ -451,7 +378,7 @@ class PicoConnection {
             this.tcpClient.write(cmd);
             this.tcpClient.write(chunkBuffer);
             
-            const filterNames = ['None', 'Tape', 'ROM', 'Disk', 'Save State'];
+            const filterNames = ['None', 'Tape', 'ROM', 'Disk', 'Save State', 'HDD'];
             const filterName = filterNames[this.fileTypeFilter] || `Unknown`;
             // Prompt.print(`Sent file chunk: files ${chunkStartIndex}-${chunkEndIndex - 1} (${chunkEndIndex - chunkStartIndex} files), total: ${fileCount}, filter: ${filterName}`);
         } catch (err) {
@@ -486,6 +413,8 @@ class PicoConnection {
                         return mainType === 3;  // Disk files have main type 3
                     case FILTER_SAVE_STATE:
                         return mainType === 4;  // Savestate files have main type 4
+                    case FILTER_HDD:
+                        return mainType === 5;  // HDD image files have main type 5
                     default:
                         return true;
                 }
@@ -545,7 +474,13 @@ class PicoConnection {
      * Disconnect from the PicoExpander
      */
     disconnect() {
-        this._stopPingInterval();
+        // Close HDD image file descriptor if open
+        if (this.hddFd !== null && this.hddFd !== undefined) {
+            try { fs.closeSync(this.hddFd); } catch (e) { /* ignore */ }
+            this.hddFd = null;
+        }
+        this.hddImage = null;
+
         if (this.tcpClient) {
             this.tcpClient.end();
             this.tcpClient = null;
@@ -572,6 +507,16 @@ class PicoConnection {
         // Start fresh connection if callback is available
         if (this.startFreshConnection) {
             this.startFreshConnection();
+        }
+    }
+
+    /**
+     * Notify Pico that the file list has changed
+     * Sends updated file chunk to refresh the file list on Pico
+     */
+    notifyFileListChanged() {
+        if (this.isConnected && this.tcpClient) {
+            this._sendFileChunk(0);
         }
     }
 
@@ -690,6 +635,12 @@ class PicoConnection {
                 data = this._convertDisk40dsLayout(data);
             }
             
+            // HDD images are loaded into server memory, not streamed to Pico
+            if (fileType === 'hdd') {
+                this._loadHddImage(filePath);
+                return;
+            }
+
             const normalizedType = fileType.startsWith('disk') ? 'disk' : fileType;
             
             switch (normalizedType) {
@@ -775,9 +726,6 @@ class PicoConnection {
             let state = 'waiting_for_OK';
             let sendInProgress = true;
             
-            // Pause ping during file transfer
-            this.commandInProgress = true;
-            
             // For savestate, send entire data at once after OK
             const sendChunkSize = (normalizedType === 'savestate') ? data.length : chunkSize;
             
@@ -808,7 +756,6 @@ class PicoConnection {
                         progressBar.clear();
                         Prompt.print(`Upload failed - another command is in progress. Please try again.`);
                         sendInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                     } else if (state === 'waiting_for_RD' && response.cmd === 'RD') {
                         const chunk = data.subarray(offset, offset + sendChunkSize);
@@ -822,20 +769,17 @@ class PicoConnection {
                         progressBar.complete();
                         Prompt.print(`Upload finished successfully.`);
                         sendInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                     } else {
                         progressBar.clear();
                         Prompt.print(`Unexpected command '${response.cmd}' in state '${state}'`);
                         sendInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                     }
                 } catch (err) {
                     progressBar.clear();
                     Prompt.print(`Error during file transfer: ${err.message}`);
                     sendInProgress = false;
-                    this.commandInProgress = false;
                     this.tcpClient.onData(() => { this._handlePicoRequest(); });
                 }
             });
@@ -843,6 +787,88 @@ class PicoConnection {
         } catch (err) {
             Prompt.print(`Failed to send file: ${err.message}`);
         }
+    }
+
+    /**
+     * Load an HDD image into server memory and notify the Pico
+     * @private
+     * @param {string} filePath - Full path to the .hdd file
+     */
+    _loadHddImage(filePath) {
+        try {
+            const hddImage = fs.readFileSync(filePath);
+            this.hddImage = hddImage;
+            this.hddFd = fs.openSync(filePath, 'r+');
+            const totalLBAs = Math.floor(hddImage.length / 256);
+
+            // Send HI notification (geometry)
+            this.tcpClient.write(createCommandBuffer('HI', totalLBAs, 0));
+
+            // Immediately push sector 0 (boot sector) so Pico is boot-ready
+            const sector0 = Buffer.alloc(10 + 256);
+            sector0.write('FS');
+            sector0.writeUInt32BE(0, 2);     // offset 0 (LBA 0)
+            sector0.writeUInt16BE(0, 6);     // file_number 0 (HDD)
+            sector0.writeUInt16BE(256, 8);   // length 256
+            hddImage.copy(sector0, 10, 0, 256);
+            this.tcpClient.write(sector0);
+
+            Prompt.print(`HDD: Loaded ${path.basename(filePath)} (${totalLBAs} sectors, sector 0 pushed)`);
+        } catch (err) {
+            Prompt.print(`Failed to load HDD image: ${err.message}`);
+        }
+    }
+
+    /**
+     * Handle FR (File Read) request from Pico
+     * @private
+     * @param {Buffer} header - 10-byte command header
+     */
+    _handleFR(header) {
+        const offset = header.readUInt32BE(2);
+        const fileNumber = header.readUInt16BE(6);
+        const length = header.readUInt16BE(8);
+        const byteOffset = offset * length;
+
+        const resp = Buffer.alloc(10 + length);
+        resp.write('FS');
+        resp.writeUInt32BE(offset, 2);
+        resp.writeUInt16BE(fileNumber, 6);
+        resp.writeUInt16BE(length, 8);
+
+        if (this.hddImage && byteOffset + length <= this.hddImage.length) {
+            this.hddImage.copy(resp, 10, byteOffset, byteOffset + length);
+        }
+        this.tcpClient.write(resp);
+    }
+
+    /**
+     * Handle FW (File Write) request from Pico
+     * @private
+     * @param {Buffer} header - 10-byte command header
+     * @param {Buffer} payload - sector data
+     */
+    _handleFW(header, payload) {
+        const offset = header.readUInt32BE(2);
+        const fileNumber = header.readUInt16BE(6);
+        const length = header.readUInt16BE(8);
+        const byteOffset = offset * length;
+
+        if (this.hddImage && byteOffset + length <= this.hddImage.length) {
+            payload.copy(this.hddImage, byteOffset, 0, length);
+            // Write-through: persist to .hdd file on disk
+            if (this.hddFd !== null && this.hddFd !== undefined) {
+                fs.writeSync(this.hddFd, this.hddImage.subarray(byteOffset, byteOffset + length), 0, length, byteOffset);
+            }
+        }
+
+        // Send ACK (header only, no payload)
+        const ack = Buffer.alloc(10);
+        ack.write('FS');
+        ack.writeUInt32BE(offset, 2);
+        ack.writeUInt16BE(fileNumber, 6);
+        ack.writeUInt16BE(length, 8);
+        this.tcpClient.write(ack);
     }
 
     /**
@@ -861,9 +887,6 @@ class PicoConnection {
         let expectedDataSize = null;
         let chunks = [];
         let progressBar = null;
-        
-        // Pause ping during save state capture
-        this.commandInProgress = true;
         
         this.tcpClient.setBuffer(Buffer.alloc(0));
         
@@ -902,14 +925,12 @@ class PicoConnection {
                     } else if (cmd === 'EC') {
                         Prompt.print("Save state failed - another command is in progress.");
                         captureInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.setBuffer(Buffer.alloc(0));
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                         return;
                     } else if (cmd === 'ER') {
                         Prompt.print("Save state failed - error response from device.");
                         captureInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.setBuffer(Buffer.alloc(0));
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                         return;
@@ -971,14 +992,12 @@ class PicoConnection {
                         this.tcpClient.setBuffer(extraData);
                         
                         captureInProgress = false;
-                        this.commandInProgress = false;
                         this.tcpClient.onData(() => { this._handlePicoRequest(); });
                     }
                 }
             } catch (err) {
                 Prompt.print(`Error during save state capture: ${err.message}`);
                 captureInProgress = false;
-                this.commandInProgress = false;
                 this.tcpClient.setBuffer(Buffer.alloc(0));
                 this.tcpClient.onData(() => { this._handlePicoRequest(); });
             }

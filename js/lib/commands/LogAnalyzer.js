@@ -10,6 +10,7 @@ class LogAnalyzer {
     constructor() {
         this.HW_LOG_OPS = null;
         this.HW_LOG_NAMES = null;
+        this.PICO_COMMANDS = null;
         this.lastRegister15 = -1;
         this.loadHeaders();
     }
@@ -21,6 +22,8 @@ class LogAnalyzer {
         const headerPath = path.resolve(__dirname, '../../../pico/c/svi-328-expander-bus.h');
         try {
             const headerContent = fs.readFileSync(headerPath, 'utf8');
+            
+            // Load HW_LOG_OPS entries
             const re = /X\(\s*(\w+)\s*,\s*"([^"\\]*)"\s*\)/g;
             const entries = [];
             let match;
@@ -31,6 +34,17 @@ class LogAnalyzer {
             this.HW_LOG_NAMES = entries.map(e => e.name);
             this.HW_LOG_OPS = entries.map(e => e.desc);
             console.log(`Loaded ${entries.length} HW_LOG_OPS entries from svi-328-expander-bus.h`);
+
+            // Load PICO_COMMANDS from write_mode_t enum
+            const cmdRe = /(WRITE_MODE_\w+|COMMAND_\w+)\s*=\s*(0x[0-9a-fA-F]+)/g;
+            this.PICO_COMMANDS = {};
+            let cmdMatch;
+            while ((cmdMatch = cmdRe.exec(headerContent)) !== null) {
+                const name = cmdMatch[1];
+                const value = parseInt(cmdMatch[2], 16);
+                this.PICO_COMMANDS[value] = name;
+            }
+            console.log(`Loaded ${Object.keys(this.PICO_COMMANDS).length} PICO_COMMANDS entries from svi-328-expander-bus.h`);
         } catch (err) {
             console.error(`Failed to load HW_LOG_OPS from header: ${err}.`);
             process.exit(1);
@@ -158,18 +172,14 @@ class LogAnalyzer {
         const name = (this.HW_LOG_NAMES && this.HW_LOG_NAMES[op]) || null;
 
         switch (name) {
-            case 'HW_LOG_WR_TEST':
             case 'HW_LOG_WR_DRIVE':
             case 'HW_LOG_WR_CONTROLLER':
             case 'HW_LOG_WR_DENSITY':
             case 'HW_LOG_WR_DATA':
-            case 'HW_LOG_RD_TEST':
             case 'HW_LOG_RD_DRIVE':
             case 'HW_LOG_RD_DATA':
             case 'HW_LOG_RD_CONTROLLER':
-            case 'HW_LOG_WR_CONTROLLER_SR':
             case 'HW_LOG_WR_CONTROLLER_RS':
-            case 'HW_LOG_INJECT_BOOT_DATABUS':
                 this.logWithTimestamp(ts, `${msg}: 0x${value.toString(16)}`);
                 break;
             case 'HW_LOG_PSG_READ_15':
@@ -198,53 +208,58 @@ class LogAnalyzer {
             case 'HW_LOG_WR_CONTROLLER_FI':
                 this.logWithTimestamp(ts, `${msg}`);
                 break;
-            case 'HW_LOG_MREQ_CART':
-            case 'HW_LOG_MREQ_BK22_RD':
-            case 'HW_LOG_MREQ_BK22_WR':
-            case 'HW_LOG_MREQ_INJECT_RD':
+            case 'HW_LOG_PICO_COMMAND':
+                const cmdName = this.PICO_COMMANDS[value] || `Unknown (0x${value.toString(16)})`;
+                this.logWithTimestamp(ts, `${msg}: ${cmdName}`);
+                break;
             case 'HW_LOG_INJECT_REVERT_15_ADDRESS':
             case 'HW_LOG_INJECT_REVERT_15_RD':
             case 'HW_LOG_INJECT_REVERT_15_WR':
             case 'HW_LOG_INJECT_REVERT_15_UNPLANNED_WR':
             case 'HW_LOG_INJECT_REVERT_0X90_ADDRESS':
             case 'HW_LOG_INJECT_REVERT_0X90_RD':
-            case 'HW_LOG_INJECT_REVERT_0X90_WR':
             case 'HW_LOG_INJECT_REVERT_0X90_UNPLANNED_WR':
             case 'HW_LOG_INJECT_CAPS_LOCK_ADDRESS':
             case 'HW_LOG_INJECT_CAPS_LOCK_RD':
             case 'HW_LOG_INJECT_CAPS_LOCK_WR':
             case 'HW_LOG_INJECT_CAPS_LOCK_UNPLANNED_WR':
-            case 'HW_LOG_INJECT_JUMP_0X0033_ADDRESS':
             case 'HW_LOG_PSG_LATCH_WR':
-            case 'HW_LOG_PSG_WRITE_WR':
-            case 'HW_LOG_CART_LOW':
-            case 'HW_LOG_CART_HIGH':
-            case 'HW_LOG_TAPE_RD_ADDRESS':
-            case 'HW_LOG_TAPE_RD':
-            case 'HW_LOG_TAPE_WR':
-            case 'HW_LOG_TAPE':
-            case 'HW_LOG_PICO_COMMAND':
             case 'HW_LOG_PICO_WR':
-            case 'HW_LOG_VDP_REGISTER_WR':
             case 'HW_LOG_DEBUG':
-            case 'HW_LOG_RAMDIS':
-            case 'HW_LOG_ROMDIS':
             case 'HW_LOG_MREQ_PREPARE_RD':
             case 'HW_LOG_INJECT_REVERT_0X90':
-            case 'HW_LOG_DEBUG_LAST_MREQ_RD_ADDRS':
-            case 'HW_LOG_MREQ_WR_ADDR':
-            case 'HW_LOG_MREQ_WR_VALUE':
             case 'HW_LOG_VDP_0X80':
             case 'HW_LOG_VDP_0X81':
             case 'HW_LOG_FILE_NAME_INDEX_BYTE':
             case 'HW_LOG_FILE_SEND_INDEX_BYTE':
-            case 'HW_LOG_INJECT_REVERT_15_UNEXPECTED_IORQ':
-            case 'HW_LOG_INJECT_REVERT_15_EXPECTED_IORQ':
             case 'HW_LOG_SET_FILE_TYPE_FILTER':
             case 'HW_LOG_FILE_COUNT_RESPONSE':
             case 'HW_LOG_FILE_NAME_READ_VALUE':
             case 'HW_LOG_FILE_CHUNK_REQUEST':
+            case 'HW_LOG_MREQ_RD_ADDR':
+            case 'HW_LOG_MREQ_RD_VALUE':
                 this.logWithTimestamp(ts, `${msg}: 0x${value.toString(16)}`);
+                break;
+            case 'HW_LOG_SASI_RESET':
+            case 'HW_LOG_SASI_SET_PARAMS':
+            case 'HW_LOG_HDD_INIT':
+                this.logWithTimestamp(ts, `${msg}`);
+                break;
+            case 'HW_LOG_SASI_SELECT':
+            case 'HW_LOG_SASI_CMD':
+            case 'HW_LOG_SASI_STATUS':
+            case 'HW_LOG_SASI_DETECT':
+            case 'HW_LOG_SASI_DATA_IN':
+            case 'HW_LOG_SASI_DATA_OUT':
+            case 'HW_LOG_SASI_MSG_IN':
+            case 'HW_LOG_SASI_BUS_STATUS':
+            case 'HW_LOG_PPI_KBD_READ':
+                this.logWithTimestamp(ts, `${msg}: 0x${value.toString(16)}`);
+                break;
+            case 'HW_LOG_SASI_READ':
+            case 'HW_LOG_SASI_WRITE':
+            case 'HW_LOG_SASI_OUT_OF_RANGE':
+                this.logWithTimestamp(ts, `${msg}: LBA ${value}`);
                 break;
             default:
                 this.logWithTimestamp(ts, `${msg}`);
