@@ -426,9 +426,10 @@ void __no_inline_not_in_flash_func(boot_initialization)() {
     file_cache_start_index = 0xffff; // Invalid marker, waiting for first chunk
     file_cache_request_index = 0; // First cache request is from index 0 if not specified
     file_cache_count = 0;
-    file_type_filter = 0;
+    file_type_filter = 0xff; // Force server filter sync on next catalog request
 
-    fdc_emulation_enabled = false;
+    // Note: fdc_emulation_enabled is NOT reset here — it was set by prepare.asm
+    // during initial boot and must be preserved across long-press reboots.
 
     sasi_phase = SASI_PHASE_BUS_FREE;
     sasi_cdb_index = 0;
@@ -1871,6 +1872,7 @@ void __no_inline_not_in_flash_func(inject_boot)() {
 
     launcher_initialization(); // Do this here because you need to be fast after injecting the boot code
     boot_initialization(); // Note: Resets ROM CARTRIDGE to 0xffs so that BIOS does not boot the cartridge if something was loaded
+    load_bootsector_to_cartridge(); // Launcher needs the bootsector ROM in cartridge slot
 
     gpio_put(RST_PIN, 1);
     sleep_ms(20);

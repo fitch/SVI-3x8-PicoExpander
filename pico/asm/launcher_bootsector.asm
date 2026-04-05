@@ -24,7 +24,7 @@
     jp RAM_START
 
 ROM_START:
-    PHASE 0x8000
+    PHASE 0xC000
 RAM_START:
     ld a, PSG_REGISTER_R15
     out (PSG_ADDRESS_LATCH), a
