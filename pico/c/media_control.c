@@ -75,7 +75,11 @@ void eject_tape(void) {
 }
 
 void load_bk11_to_cartridge(void) {
-    memcpy((void *)ROM_CARTRIDGE, (void *)BK11, 32768);
+    // Restore the captured real 32 kB cartridge: copy the upper half of ROM_CARTRIDGE
+    // down into the lower half (BK11 slot). With no cartridge
+    // captured the upper half is 0xff, so this also cleans the bootsector out of
+    // the lower half.
+    memcpy((void *)ROM_CARTRIDGE, (void *)ROM_CARTRIDGE + 0x8000, 32768);
 }
 
 void load_bootsector_to_cartridge(void) {

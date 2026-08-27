@@ -120,6 +120,9 @@ add_executable(svi-3x8-picoexpander
     pico/c/media_control.c
     pico/c/log.c
     pico/c/wifi.c
+    pico/c/frame.c
+    pico/c/cmd.c
+    pico/lib/mpack/mpack.c
     )
 
 # Ensure headers are generated before compiling
@@ -128,6 +131,7 @@ add_dependencies(svi-3x8-picoexpander generate_launcher_bootsector generate_inje
 target_include_directories(svi-3x8-picoexpander PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/pico
     ${CMAKE_CURRENT_LIST_DIR}/pico/c # lwipopts.h
+    ${CMAKE_CURRENT_LIST_DIR}/pico/lib/mpack
     ${CMAKE_CURRENT_BINARY_DIR}
     )
 
@@ -146,7 +150,8 @@ target_compile_definitions(svi-3x8-picoexpander PRIVATE
     VERSION="${VERSION}"
     PICO_EMBED_XIP_SETUP=1
     PICO_FLASH_ASSUME_CORE1_SAFE=1
-    CYW43_PIO_CLOCK_DIV_DYNAMIC=1)
+    CYW43_PIO_CLOCK_DIV_DYNAMIC=1
+    MPACK_HAS_CONFIG=1)
 
 target_compile_definitions(bs2_default PRIVATE
     PICO_FLASH_SPI_RXDELAY=4

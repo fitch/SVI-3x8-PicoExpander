@@ -164,7 +164,6 @@ volatile uint8_t RAM0[32768] = {[0 ... sizeof(RAM0)-1] = 0xff}; // BK02
 volatile uint8_t RAM2[65536] = {[0 ... sizeof(RAM2)-1] = 0xff}; // BK21 and BK22
 volatile uint8_t RAM3[65536] = {[0 ... sizeof(RAM3)-1] = 0xff}; // BK31 and BK32
 volatile uint8_t RAM4[65536] = {[0 ... sizeof(RAM4)-1] = 0xff}; // BK41 and BK42
-volatile uint8_t BK11[32768] = {[0 ... sizeof(BK11)-1] = 0xff}; // Real BK11 contents captured (32 kB cartridge ROM)
 
 volatile uint8_t *LOWER_BANK; // Points to whatever is currently in the lower bank
 volatile bool lower_bank_is_ROM;
@@ -244,7 +243,6 @@ extern int doorbell_flash_dump_disk;
 volatile media_control_command_t doorbell_parameter_media_control_command;
 volatile file_server_request_type_t doorbell_parameter_file_server_request_type;
 
-volatile uint16_t dump_log_index = 0;
 
 volatile uint8_t FILE_CACHE[FILE_CACHE_SIZE * FILE_ENTRY_SIZE];
 volatile uint16_t file_cache_start_index;
@@ -515,7 +513,11 @@ void __no_inline_not_in_flash_func(prepare)() {
                         if (write_mode == WRITE_MODE_BIOS && write_index < sizeof(BIOS)) {
                             BIOS[write_index++] = value;
                         } else if (write_mode == WRITE_MODE_32KB_ROM && write_index < 32768) {
-                            BK11[write_index++] = value;
+                            // Capture the real cartridge into the UPPER half of ROM_CARTRIDGE
+                            // (BK12 region). The lower half holds the launcher bootsector during
+                            // boot; load_bk11_to_cartridge() later copies this down to the lower
+                            // half (upper -> lower) once the launcher is running.
+                            ROM_CARTRIDGE[0x8000 + write_index++] = value;
                         }
                     }
                     break;
@@ -610,7 +612,19 @@ void __no_inline_not_in_flash_func(floppy_and_ram_emulation)() {
                 case 0x13:
                     if (is_rd) { // Pico state
                         value = pico_state;
-                        // hw_log_value(HW_LOG_RD_PICO_STATE, value);
+                        // Auto-reset *_READY states after Z80 reads them,
+                        // so the next transfer creates a detectable state change.
+                        switch (pico_state) {
+                            case PICO_STATE_ROM_READY:
+                            case PICO_STATE_DISK_READY:
+                            case PICO_STATE_TAPE_READY:
+                            case PICO_STATE_SAVE_STATE_READY:
+                            case PICO_STATE_SAVE_STATE_SENT:
+                                pico_state = PICO_STATE_CLIENT_CONNECTED;
+                                break;
+                            default:
+                                break;
+                        }
                         write_to_data_pins = true;
                     } else { // Pico command
                         hw_log_value(HW_LOG_PICO_COMMAND, value);
@@ -666,11 +680,6 @@ void __no_inline_not_in_flash_func(floppy_and_ram_emulation)() {
                             case COMMAND_REVERT_BIOS:
                                 doorbell_parameter_media_control_command = MEDIA_CONTROL_REVERT_BIOS_PATCH;
                                 multicore_doorbell_set_other_core(doorbell_media_control);
-                                break;
-                            case COMMAND_DUMP_LOG:
-                                dump_log_index = 0;
-                                pico_state = PICO_STATE_DUMP_LOG; // FIXME: This is deprecated
-                                write_mode = value;
                                 break;
                             case COMMAND_ERASE_CREDENTIALS:
                                 pico_state = PICO_STATE_WIFI_RESET;
@@ -847,10 +856,7 @@ void __no_inline_not_in_flash_func(floppy_and_ram_emulation)() {
                             // hw_log_value(HW_LOG_PICO_WR, value);
                         }
                     } else if (is_rd) {
-                        if (pico_state == PICO_STATE_DUMP_LOG) {
-                            value = log_buffer[dump_log_index++];
-                            write_to_data_pins = true;
-                        } else if (write_mode == COMMAND_GET_FILE_COUNT) {
+                        if (write_mode == COMMAND_GET_FILE_COUNT) {
                             if (write_index == 0) { 
                                 value = FILE_REQUEST_STATUS_NOT_READY; // FIXME: Think, the read shouldn't occur here yet, should return not ready
                             } else if (write_index == 1) {
@@ -1440,11 +1446,12 @@ void __no_inline_not_in_flash_func(floppy_and_ram_emulation)() {
                     } else {
                         switch (value) {
                             case 0x01:
-                                tape_index = 0;
-                                if (tape_size > 0) {
+                                // Only refetch buffer if we've read past the first chunk
+                                if (tape_index >= TAPE_BUFFER_SIZE && tape_size > 0) {
                                     TAPE_BUFFER_ready = false;
                                     multicore_doorbell_set_other_core(doorbell_fetch_tape_track);
                                 }
+                                tape_index = 0;
                                 hw_log(HW_LOG_TAPE_REWIND);
                                 break;
                             case 0x02:
@@ -1778,7 +1785,10 @@ void __no_inline_not_in_flash_func(floppy_and_ram_emulation)() {
                 last_mreq_value = value;
                 WRITE_DATA_PINS(value);
 
-                if ((*menu_state & MENU_STATE_IN_MENU_BIT) && addr == 0x0037) {
+                // Only the launcher's own EXIT stub may trigger the savestate resume (lower
+                // bank = BK41); data reads sweeping 0x0037 with another bank mapped (e.g. the
+                // cheat finder's LDIR/CPIR over BKF1) must not.
+                if ((*menu_state & MENU_STATE_IN_MENU_BIT) && addr == 0x0037 && LOWER_BANK == RAM4) {
                     psg_register_15 = RAM4[SAVE_PSG_R15];
                     update_banks();
                     *menu_state &= ~MENU_STATE_IN_MENU_BIT; // Clear b0

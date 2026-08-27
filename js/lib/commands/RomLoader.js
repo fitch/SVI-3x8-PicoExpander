@@ -1,80 +1,79 @@
 const fs = require('fs');
-const NetworkDiscovery = require('../network/NetworkDiscovery');
-const TcpClient = require('../network/TcpClient');
-const { createCommandBuffer, padBuffer } = require('../network/ProtocolUtils');
+const { padBuffer } = require('../network/ProtocolUtils');
+const { PRI_BULK } = require('../network/FrameTransport');
+const ProgressBar = require('../utils/ProgressBar');
+
+const BLOCK_SIZE = 16384;
 
 /**
- * RomLoader handles ROM file uploads to the SVI-3x8 PicoExpander
+ * CRC-16/CCITT (poly 0x1021, init 0xFFFF)
+ */
+function crc16(data) {
+    let crc = 0xFFFF;
+    for (let i = 0; i < data.length; i++) {
+        crc ^= data[i] << 8;
+        for (let j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+        }
+    }
+    return crc;
+}
+
+/**
+ * RomLoader handles ROM file uploads to the SVI-3x8 PicoExpander via v2 protocol
  */
 class RomLoader {
     /**
      * Load a ROM file to the device
      * @param {string} filename - Path to ROM file
-     * @param {Object} picoAddress - Optional. If provided, uses existing connection instead of UDP discovery
-     * @param {Function} onComplete - Optional callback when operation completes
-     * @param {Function} onError - Optional callback on error
+     * @param {FrameTransport} transport - v2 FrameTransport instance
+     * @param {Function} onComplete - Callback when operation completes
+     * @param {Function} onError - Callback on error
      */
-    static async load(filename, picoAddress = null, onComplete = null, onError = null) {
-        let romData = fs.readFileSync(filename);
-        
-        if (romData.length < 2048 || romData.length > 65536) {
-            console.error(`ROM file size must be 2048-65536 bytes, now ${romData.length} bytes`);
-            if (picoAddress) {
-                // Interactive mode - don't exit
-                if (onError) onError(new Error('Invalid ROM size'));
-                return;
+    static async load(filename, transport, onComplete = null, onError = null) {
+        try {
+            let romData = fs.readFileSync(filename);
+
+            if (romData.length < 2048 || romData.length > 65536) {
+                throw new Error(`ROM file size must be 2048-65536 bytes, got ${romData.length}`);
             }
-            process.exit(1);
-        }
 
-        // Pad to 64KB if needed (use 0xFF as that's the empty ROM state)
-        romData = padBuffer(romData, 65536, 0xFF);
-        
-        let remote = picoAddress;
-        if (!remote) {
-            const discovery = new NetworkDiscovery();
-            remote = await discovery.waitForHandshake();
-        }
-        
-        const client = new TcpClient(remote);
-        await client.connect();
-        
-        console.log("Connected. Sending ROM upload command...");
-        client.write(createCommandBuffer("LR", romData.length, romData.length));
+            romData = padBuffer(romData, 65536, 0xFF);
 
-        client.onData(() => {
-            try {
-                const response = client.readCommand();
-                if (!response) return;
+            const expectedCrc = crc16(romData);
 
-                if (response.cmd === 'OK') {
-                    console.log("Received OK. Sending ROM data...");
-                    client.write(romData);
-                    console.log("ROM image sent");
-                    client.end();
-                } else if (response.cmd === 'EC') {
-                    console.error("ROM load failed - another command is in progress. Please try again.");
-                    client.end();
-                    reject(new Error('Command in progress'));
-                } else if (response.cmd === 'ER') {
-                    console.error("Error response received, aborting...");
-                    client.end();
+            // Send file_begin
+            await transport.sendCommand('file_begin', {
+                type: 'rom',
+                size: romData.length,
+                block_size: BLOCK_SIZE
+            }, PRI_BULK);
+
+            // Send data blocks with per-block acks
+            const totalBlocks = Math.ceil(romData.length / BLOCK_SIZE);
+            const progressBar = new ProgressBar(romData.length, 'Sending');
+            let lastAck;
+            for (let block = 0; block < totalBlocks; block++) {
+                const offset = block * BLOCK_SIZE;
+                const chunk = romData.subarray(offset, offset + BLOCK_SIZE);
+                lastAck = await transport.sendData(block, chunk);
+                progressBar.update(offset + chunk.length);
+            }
+            progressBar.complete();
+
+            // Verify CRC from final ack
+            if (lastAck && lastAck.crc !== undefined) {
+                if (lastAck.crc !== expectedCrc) {
+                    throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16).padStart(4, '0')}, got 0x${lastAck.crc.toString(16).padStart(4, '0')}`);
                 }
-            } catch (err) {
-                console.error(err.message);
-                client.end();
+                const Prompt = require('../ui/Prompt');
+                Prompt.print(`ROM CRC: 0x${expectedCrc.toString(16).padStart(4, '0')} OK`, false);
             }
-        });
 
-        client.onClose(() => {
-            console.log('TCP connection closed');
             if (onComplete) onComplete();
-        });
-
-        client.onError((err) => {
-            console.error(`TCP Error: ${err.message}`);
+        } catch (err) {
             if (onError) onError(err);
-        });
+        }
     }
 }
 

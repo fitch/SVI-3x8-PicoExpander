@@ -11,7 +11,11 @@ const Prompt = require('./lib/ui/Prompt');
  * Usage: node server.js <directory>
  * Example: node server.js ./images
  */
+const VERSION = '1.4.4';
+
 async function main() {
+    console.log(`SVI-3x8 PicoExpander Server ${VERSION} - (c) 2026 MAG-4\n`);
+
     const args = process.argv.slice(2);
 
     if (args.length === 0) {
@@ -46,18 +50,18 @@ async function main() {
         
         connectToPico();
         
-        process.on('SIGINT', () => {
+        const shutdown = async () => {
             console.log('\n\nShutting down server...');
-            picoConnection.disconnect();
+            // Best-effort: tell the Pico the HDD is gone so the PicoExpander
+            // doesn't keep showing a mounted HDD after we exit. shutdown() also
+            // disconnects; it's bounded by a short timeout on a dead link.
+            await picoConnection.shutdown();
             server.stop();
             process.exit(0);
-        });
+        };
 
-        process.on('SIGTERM', () => {
-            picoConnection.disconnect();
-            server.stop();
-            process.exit(0);
-        });
+        process.on('SIGINT', shutdown);
+        process.on('SIGTERM', shutdown);
         
     } catch (err) {
         console.error('Error:', err.message);

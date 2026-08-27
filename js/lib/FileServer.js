@@ -38,22 +38,22 @@ class FileServer {
     /**
      * Scan the entire directory
      */
-    async scanDirectory() {
-        console.log('\nScanning directory...');
-        
+    async scanDirectory(silent = false) {
+        if (!silent) console.log('\nScanning directory...');
+
         // Clear existing data
         this.files.clear();
         this.invalidFiles.clear();
-        
+
         // Get all files recursively
         const allFiles = FileScanner.scanDirectoryRecursive(this.directory);
-        
+
         // Scan each file silently during initial scan
         for (const filePath of allFiles) {
             await this._updateFile(filePath, true);
         }
-        
-        console.log(`Scan complete. Found ${this.files.size} valid file(s) and ${this.invalidFiles.size} invalid file(s).`);
+
+        if (!silent) console.log(`Scan complete. Found ${this.files.size} valid file(s) and ${this.invalidFiles.size} invalid file(s).`);
     }
 
     /**

@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const NetworkDiscovery = require('./NetworkDiscovery');
 const TcpClient = require('./TcpClient');
+const FrameTransport = require('./FrameTransport');
 const Prompt = require('../ui/Prompt');
 const { createCommandBuffer } = require('./ProtocolUtils');
 const SaveStateSaver = require('../commands/SaveStateSaver');
@@ -29,6 +30,9 @@ class PicoConnection {
         this.reconnectCallback = null;
         this.fileTypeFilter = FILTER_NONE;  // Current file type filter
         this.targetIdentifier = null;  // Identifier of the Pico we want to reconnect to
+        this.frameTransport = null;    // v2 protocol connection (port 4244)
+        this.logHistory = [];          // Accumulated log events from v2 protocol
+        this._logNotified = false;     // Whether we've shown the "press T to view" hint
     }
 
     /**
@@ -55,43 +59,20 @@ class PicoConnection {
                 this.discovery = null;
             }
             
-            Prompt.print(`Connecting to ${this.picoAddress.address}:${this.picoAddress.port}...`);
-            this.tcpClient = new TcpClient(this.picoAddress);
-            await this.tcpClient.connect();
-            
-            this.tcpClient.onClose(() => {
-                if (!this.isConnected) {
-                    return;
-                }
-                Prompt.print('TCP connection closed unexpectedly.');
-                this.isConnected = false;
-                this.tcpClient = null;
-                
-                // Trigger internal reconnection to the same Pico
-                if (this.targetIdentifier) {
-                    this._reconnectToSamePico();
-                }
-            });
+            Prompt.print(`Connecting to ${this.picoAddress.address}...`);
 
-            this.tcpClient.onError((err) => {
-                Prompt.print(`TCP Error: ${err.message}`);
-            });
-
-            this.tcpClient.onData(() => {
-                this._handlePicoRequest();
-            });
-            
             const identifier = this.picoAddress.identifier ? ` [${this.picoAddress.identifier}]` : '';
-            Prompt.printFinal(`Connected to SVI-3x8 PicoExpander${identifier}`);
-            
+
             this.isConnected = true;
             this.isReconnecting = false;
-            
-            // Store the identifier for reconnection
             this.targetIdentifier = this.picoAddress.identifier;
 
+            await this._connectV2(this.picoAddress.address);
             this._sendInitialFileChunk();
-            
+            this._syncHddState();  // fresh start → tell the Pico "no HDD mounted"
+
+            Prompt.printFinal(`Connected to SVI-3x8 PicoExpander${identifier}`);
+
             return this.picoAddress;
         } catch (err) {
             this.isConnected = false;
@@ -102,7 +83,358 @@ class PicoConnection {
     }
 
     /**
-     * Handle requests from Pico
+     * Attempt to connect to the v2 protocol on port 4244.
+     * Non-blocking — if the Pico doesn't support v2 yet, we silently continue with v1.
+     * @private
+     * @param {string} address - IP address of the Pico
+     */
+    async _connectV2(address) {
+        // Close any existing v2 connection
+        if (this.frameTransport) {
+            this.frameTransport.close();
+            this.frameTransport = null;
+        }
+
+        try {
+            this.frameTransport = new FrameTransport();
+
+            this.frameTransport.on('close', () => {
+                if (this.frameTransport) {
+                    if (this._heartbeatInterval) {
+                        clearInterval(this._heartbeatInterval);
+                        this._heartbeatInterval = null;
+                    }
+                    this.frameTransport = null;
+                    this.isConnected = false;
+                    Prompt.print('Connection lost.');
+                    if (this.targetIdentifier) {
+                        Prompt.print('Reconnecting...');
+                        this._reconnectToSamePico();
+                    }
+                }
+            });
+
+            this.frameTransport.on('error', (err) => {
+                // Errors are handled by the close event
+            });
+
+            this.frameTransport.on('message', (msg) => {
+                if (msg.t === 'event' && msg.c === 'log') {
+                    if (!this._logNotified) {
+                        Prompt.print('Receiving log from Pico (press T to view)');
+                        this._logNotified = true;
+                    }
+                    this.logHistory.push(msg);
+                } else if (msg.t === 'cmd') {
+                    this._handleV2Command(msg);
+                } else if (msg.t === 'data' && msg.c === 'state_save') {
+                    this._handleV2SaveStateData(msg);
+                }
+            });
+
+            await this.frameTransport.connect(address);
+            await this.frameTransport.ping();
+
+            // Heartbeat: ping every 1s with a 2s per-ping timeout, one ping at a
+            // time (never overlap). Close after 3 consecutive misses.
+            this._missedPings = 0;
+            this._pingInFlight = false;
+            this._heartbeatInterval = setInterval(() => {
+                // Skip if there's no connection or a ping is still outstanding —
+                // overlapping pings (1s interval vs 2s timeout) would pile up and,
+                // on close, reject together and log spurious extra misses.
+                if (!this.frameTransport || this._pingInFlight) return;
+                this._pingInFlight = true;
+                this.frameTransport.ping(2000).then(() => {
+                    this._pingInFlight = false;
+                    if (!this.frameTransport) return; // settled after close — ignore
+                    if (this._missedPings > 0) {
+                        Prompt.print(`Heartbeat recovered after ${this._missedPings} missed ping(s)`);
+                    }
+                    this._missedPings = 0;
+                }).catch(() => {
+                    this._pingInFlight = false;
+                    if (!this.frameTransport) return; // settled after close — ignore
+                    // A ping can time out simply because the socket is saturated
+                    // with a bulk upload (16 KB blocks) over a slow link — the
+                    // ping sits queued past its timeout while the connection is
+                    // perfectly alive. If we've heard from the Pico recently
+                    // (e.g. block acks), treat the connection as healthy and
+                    // don't count this as a miss.
+                    if (this.frameTransport.msSinceRecv() < 2000) {
+                        this._missedPings = 0;
+                        return;
+                    }
+                    this._missedPings++;
+                    Prompt.print(`Heartbeat ping missed (${this._missedPings}/3)`);
+                    if (this._missedPings >= 3) {
+                        Prompt.print('Heartbeat lost — closing connection');
+                        this.frameTransport.close();
+                    }
+                });
+            }, 1000);
+        } catch (err) {
+            // Detach our listeners before closing. Otherwise close() synchronously
+            // fires the 'close' handler above, which starts an independent
+            // _reconnectToSamePico() loop — while this same error also propagates
+            // to our caller (connect() → server.js retry). Two reconnect loops then
+            // race to bind UDP 4243 and one loses with EADDRINUSE. The caller owns
+            // the retry; this failure must not also spawn a background one.
+            if (this.frameTransport) {
+                this.frameTransport.removeAllListeners();
+                this.frameTransport.close();
+                this.frameTransport = null;
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Handle v2 commands from Pico
+     * @private
+     */
+    _handleV2Command(msg) {
+        if (msg.c === 'catalog_get') {
+            const offset = msg.offset || 0;
+            this._sendFileChunk(offset);
+        } else if (msg.c === 'catalog_filter') {
+            this.fileTypeFilter = msg.filter || 0;
+            this._sendFileChunk(0);
+        } else if (msg.c === 'state_save') {
+            this._handleV2SaveStateBegin(msg);
+        } else if (msg.c === 'hdd_read') {
+            this._handleHddRead(msg);
+        } else if (msg.c === 'hdd_write') {
+            this._handleHddWrite(msg);
+        } else if (msg.c === 'file_get') {
+            const fileIndex = msg.index || 0;
+            const fileList = this._getSortedFileList();
+            if (fileIndex < fileList.length) {
+                const fileInfo = fileList[fileIndex];
+                const displayName = fileInfo.metadata && fileInfo.metadata.name ? fileInfo.metadata.name : fileInfo.name;
+                const fileType = fileInfo.type || 'unknown';
+                Prompt.print(`Sending "${displayName}" (${fileType})`);
+                const fullFilePath = fileInfo.relativePath.startsWith('/')
+                    ? fileInfo.relativePath
+                    : require('path').join(this.server.directory, fileInfo.relativePath);
+                this._sendFileV2(fullFilePath, fileType);
+            } else {
+                Prompt.print(`File index ${fileIndex} out of range (${fileList.length} files)`);
+            }
+        }
+    }
+
+    /**
+     * Handle v2 save state begin command from Pico
+     * @private
+     */
+    _handleV2SaveStateBegin(msg) {
+        const bankConfig = msg.bank_config || 0;
+        const totalSize = msg.size || 0;
+        const filename = msg.filename || 'saved_state';
+
+        Prompt.print(`Receiving save state (bank_config=0x${bankConfig.toString(16).padStart(2, '0')}, ${totalSize} bytes)`);
+
+        this._saveStateReceive = {
+            bankConfig,
+            totalSize,
+            filename: filename.endsWith('.sta') ? filename : filename + '.sta',
+            received: 0,
+            chunks: [],
+            progressBar: new ProgressBar(totalSize, 'Receiving')
+        };
+    }
+
+    /**
+     * Handle v2 save state data block from Pico
+     * @private
+     */
+    _handleV2SaveStateData(msg) {
+        const rx = this._saveStateReceive;
+        if (!rx) {
+            Prompt.print('Save state data received with no active transfer');
+            return;
+        }
+
+        if (msg.d && Buffer.isBuffer(msg.d)) {
+            rx.chunks.push(msg.d);
+            rx.received += msg.d.length;
+            rx.progressBar.update(rx.received);
+        }
+
+        if (rx.received >= rx.totalSize) {
+            rx.progressBar.complete();
+
+            const receivedData = Buffer.concat(rx.chunks);
+
+            // Data format: bank_config (1 byte) + RAM4 + banks
+            // Strip the bank_config byte prefix for the file
+            const dataAfterConfig = receivedData.subarray(1, rx.totalSize);
+
+            // Create .sta file with header
+            const header = Buffer.alloc(SaveStateSaver.HEADER_SIZE, 0x00);
+            header.write(SaveStateSaver.HEADER_MAGIC, 0, 'ascii');
+            header.writeUInt8(SaveStateSaver.HEADER_VERSION, 21);
+            header.writeUInt8(rx.bankConfig, 23);
+
+            const saveStateFile = Buffer.concat([header, dataAfterConfig]);
+
+            const fullPath = this.server
+                ? path.join(this.server.directory, rx.filename)
+                : path.join(process.cwd(), rx.filename);
+
+            try {
+                fs.writeFileSync(fullPath, saveStateFile);
+                Prompt.print(`Save state saved to: ${rx.filename} (${saveStateFile.length} bytes)`);
+            } catch (err) {
+                Prompt.print(`Error writing save state: ${err.message}`);
+            }
+
+            this._saveStateReceive = null;
+
+            // File watcher will detect the new .sta file and update catalog automatically
+        }
+    }
+
+    /**
+     * Handle HDD read request from Pico via v2
+     * @private
+     */
+    _handleHddRead(msg) {
+        const lba = msg.lba || 0;
+        const seq = msg.s;
+        const byteOffset = lba * 256;
+
+        if (!this.hddImage || byteOffset + 256 > this.hddImage.length) {
+            // Send error ack
+            if (this.frameTransport) {
+                this.frameTransport.send({
+                    t: 'ack', s: seq, lba, d: Buffer.alloc(256, 0xFF)
+                }, FrameTransport.PRI_CRITICAL);
+            }
+            return;
+        }
+
+        const sector = this.hddImage.subarray(byteOffset, byteOffset + 256);
+        if (this.frameTransport) {
+            this.frameTransport.send({
+                t: 'ack', s: seq, lba, d: sector
+            }, FrameTransport.PRI_CRITICAL);
+        }
+    }
+
+    /**
+     * Handle HDD write request from Pico via v2
+     * @private
+     */
+    _handleHddWrite(msg) {
+        const lba = msg.lba || 0;
+        const seq = msg.s;
+        const byteOffset = lba * 256;
+        const payload = msg.d;
+
+        if (this.hddImage && payload && Buffer.isBuffer(payload) && byteOffset + 256 <= this.hddImage.length) {
+            payload.copy(this.hddImage, byteOffset, 0, 256);
+            // Write-through to disk
+            if (this.hddFd !== null && this.hddFd !== undefined) {
+                fs.writeSync(this.hddFd, this.hddImage.subarray(byteOffset, byteOffset + 256), 0, 256, byteOffset);
+            }
+        }
+
+        // Send ack
+        if (this.frameTransport) {
+            this.frameTransport.send({
+                t: 'ack', s: seq
+            }, FrameTransport.PRI_CRITICAL);
+        }
+    }
+
+    /**
+     * Load an HDD image and notify the Pico via v2
+     * @param {string} filePath - Full path to the .hdd file
+     */
+    async loadHddImage(filePath) {
+        if (!this.frameTransport) {
+            throw new Error('v2 protocol not connected');
+        }
+
+        const hddImage = fs.readFileSync(filePath);
+        this.hddImage = hddImage;
+        this.hddFd = fs.openSync(filePath, 'r+');
+        const totalLBAs = Math.floor(hddImage.length / 256);
+
+        // Send hdd_load command with sector 0 data
+        const sector0 = hddImage.subarray(0, 256);
+        await this.frameTransport.sendCommand('hdd_load', {
+            lbas: totalLBAs,
+            d: sector0
+        }, FrameTransport.PRI_NORMAL, 5000);
+
+        Prompt.print(`HDD: Loaded ${path.basename(filePath)} (${totalLBAs} sectors)`);
+    }
+
+    /**
+     * Unload HDD image and notify Pico via v2
+     */
+    async unloadHddImage() {
+        if (this.hddFd !== null && this.hddFd !== undefined) {
+            try { fs.closeSync(this.hddFd); } catch (e) { /* ignore */ }
+            this.hddFd = null;
+        }
+        this.hddImage = null;
+
+        if (this.frameTransport) {
+            await this.frameTransport.sendCommand('hdd_unload', {}, FrameTransport.PRI_NORMAL, 5000);
+        }
+    }
+
+    /**
+     * Sync the Pico's HDD state to ours after a (re)connection.
+     * The Pico keeps its HDD state until told otherwise, so a stale "mounted"
+     * state can survive a previous server exiting. On a fresh start we have no
+     * image, so we explicitly tell the Pico "no HDD"; after a reconnect where we
+     * still hold an image, we re-mount it. Fire-and-forget — failures are non-fatal.
+     * @private
+     */
+    _syncHddState() {
+        if (!this.frameTransport) return;
+        if (this.hddImage) {
+            const totalLBAs = Math.floor(this.hddImage.length / 256);
+            const sector0 = this.hddImage.subarray(0, 256);
+            this.frameTransport.sendCommand('hdd_load', { lbas: totalLBAs, d: sector0 },
+                FrameTransport.PRI_NORMAL, 5000).catch(() => {});
+        } else {
+            this.frameTransport.sendCommand('hdd_unload', {},
+                FrameTransport.PRI_NORMAL, 5000).catch(() => {});
+        }
+    }
+
+    /**
+     * Tell the Pico the HDD is gone. Used on server shutdown so the PicoExpander
+     * doesn't keep showing a mounted HDD it can no longer reach. Short timeout so
+     * a dead link doesn't stall shutdown.
+     * @param {number} [timeoutMs]
+     */
+    async notifyHddUnmounted(timeoutMs = 1500) {
+        if (!this.frameTransport) return;
+        await this.frameTransport.sendCommand('hdd_unload', {}, FrameTransport.PRI_NORMAL, timeoutMs);
+    }
+
+    /**
+     * Graceful shutdown: best-effort tell the Pico the HDD is gone, then disconnect.
+     * Safe to call from any exit path (signal handler, Ctrl+C, quit command).
+     */
+    async shutdown() {
+        try {
+            if (this.connected) {
+                await this.notifyHddUnmounted();
+            }
+        } catch (e) { /* best effort — going away regardless */ }
+        this.disconnect();
+    }
+
+    /**
+     * Handle requests from Pico (v1 protocol)
      * @private
      */
     _handlePicoRequest() {
@@ -219,26 +551,22 @@ class PicoConnection {
         this.picoAddress = null;  // Clear current address - Pico may have a new IP
 
         const attemptReconnect = async () => {
-            // Check if aborted before each attempt
             if (!this.targetIdentifier) {
                 this.isReconnecting = false;
                 return;
             }
 
             try {
-                // Discover devices and find the one with matching identifier (30 second timeout)
                 this.discovery = new NetworkDiscovery();
                 const device = await this.discovery.waitForHandshakeByIdentifier(this.targetIdentifier, 30000);
                 this.discovery = null;
 
-                // Check if aborted during discovery
                 if (!this.targetIdentifier) {
                     this.isReconnecting = false;
                     return;
                 }
 
                 if (!device) {
-                    // Device not found within timeout - retry silently
                     Prompt.print(`Still scanning for Pico [${this.targetIdentifier}]...`);
                     this.isReconnecting = false;
                     this._reconnectToSamePico();
@@ -247,46 +575,30 @@ class PicoConnection {
 
                 this.picoAddress = device;
 
-                this.tcpClient = new TcpClient(this.picoAddress);
-                await this.tcpClient.connect();
-
-                this.tcpClient.onClose(() => {
-                    if (!this.isConnected) {
-                        return;
-                    }
-                    Prompt.print('TCP connection closed unexpectedly.');
-                    this.isConnected = false;
-                    this.tcpClient = null;
-                    
-                    // Trigger reconnection to the same Pico
-                    if (this.targetIdentifier) {
-                        this._reconnectToSamePico();
-                    }
-                });
-
-                this.tcpClient.onError((err) => {
-                    Prompt.print(`TCP Error: ${err.message}`);
-                });
-
-                this.tcpClient.onData(() => {
-                    this._handlePicoRequest();
-                });
+                await this._connectV2(this.picoAddress.address);
+                this._sendInitialFileChunk();
+                this._syncHddState();  // re-mount our HDD (or confirm none) after reconnect
 
                 const identifier = this.picoAddress.identifier ? ` [${this.picoAddress.identifier}]` : '';
                 Prompt.printFinal(`Reconnected to SVI-3x8 PicoExpander${identifier}`);
 
                 this.isConnected = true;
                 this.isReconnecting = false;
-
-                this._sendInitialFileChunk();
             } catch (err) {
-                // Check if aborted
+                // Release any discovery socket from this failed attempt before
+                // retrying. Otherwise the next attempt reassigns this.discovery
+                // and leaks a socket still bound to UDP 4243, and every rebind
+                // after that fails with EADDRINUSE.
+                if (this.discovery) {
+                    this.discovery.close();
+                    this.discovery = null;
+                }
+
                 if (!this.targetIdentifier) {
                     this.isReconnecting = false;
                     return;
                 }
-                
-                // Connection error - retry silently
+
                 Prompt.print(`Still scanning for Pico [${this.targetIdentifier}]...`);
                 setTimeout(() => {
                     if (!this.isConnected && this.targetIdentifier) {
@@ -301,86 +613,51 @@ class PicoConnection {
     }
 
     /**
-     * Send initial file chunk to Pico (first 256 files)
+     * Send initial file catalog to Pico via v2
      * @private
      */
     _sendInitialFileChunk() {
-        if (!this.isConnected || !this.tcpClient) {
-            return;
-        }
-
-        try {
-            // Prompt.print('Sending initial file list to Pico...');
-            this._sendFileChunk(0);
-
-            // Re-send HDD image notification if an image is loaded
-            if (this.hddImage) {
-                const totalLBAs = Math.floor(this.hddImage.length / 256);
-                this.tcpClient.write(createCommandBuffer('HI', totalLBAs, 0));
-
-                // Push sector 0 (boot sector)
-                const sector0 = Buffer.alloc(10 + 256);
-                sector0.write('FS');
-                sector0.writeUInt32BE(0, 2);
-                sector0.writeUInt16BE(0, 6);
-                sector0.writeUInt16BE(256, 8);
-                this.hddImage.copy(sector0, 10, 0, 256);
-                this.tcpClient.write(sector0);
-
-                Prompt.print(`HDD: Re-mounted (${totalLBAs} sectors)`);
-            }
-        } catch (err) {
-            Prompt.print(`Error sending initial file chunk: ${err.message}`);
-        }
+        if (!this.frameTransport) return;
+        this._sendFileChunk(0);
     }
 
     /**
-     * Send file chunk to Pico (256 files starting from specified index)
-     * Also includes total file count in the header.
+     * Send file catalog chunk to Pico via v2 catalog_update command.
      * @private
      * @param {number} fileIndex - File index to center the chunk around
      */
     _sendFileChunk(fileIndex) {
-        if (!this.isConnected || !this.tcpClient) {
-            return;
-        }
+        if (!this.frameTransport) return;
 
         try {
             const fileList = this._getSortedFileList();
             const fileCount = fileList.length;
-            
+
             const chunkStartIndex = Math.floor(fileIndex / 256) * 256;
             const chunkEndIndex = Math.min(chunkStartIndex + 256, fileList.length);
             const chunkBuffer = Buffer.alloc(256 * 32, 0x00);
-            
+
             for (let i = chunkStartIndex; i < chunkEndIndex; i++) {
                 const fileInfo = fileList[i];
                 const offset = (i - chunkStartIndex) * 32;
-                
-                // Byte 0: Reserved (0x00)
+
                 chunkBuffer.writeUInt8(0x00, offset);
-                
-                // Byte 1: File type code
                 chunkBuffer.writeUInt8(fileInfo.typeCode || 0x00, offset + 1);
-                
-                // Bytes 2-31: Filename (30 bytes, null-padded)
-                // Use parsed name from metadata (e.g., "Super Cross Force" instead of full filename)
+
                 const displayName = fileInfo.metadata && fileInfo.metadata.name ? fileInfo.metadata.name : fileInfo.name;
                 const filename = displayName.substring(0, 30);
                 chunkBuffer.write(filename, offset + 2, 30, 'ascii');
             }
-            
-            // Pack chunk start index (low 16 bits) and file count (high 16 bits) into total_size field
-            const packedInfo = (fileCount << 16) | (chunkStartIndex & 0xFFFF);
-            // Pack filter (high 8 bits) and data size (low 24 bits) into chunk_size field
-            const packedChunkSize = (this.fileTypeFilter << 24) | (chunkBuffer.length & 0xFFFFFF);
-            const cmd = createCommandBuffer('FX', packedInfo, packedChunkSize);
-            this.tcpClient.write(cmd);
-            this.tcpClient.write(chunkBuffer);
-            
-            const filterNames = ['None', 'Tape', 'ROM', 'Disk', 'Save State', 'HDD'];
-            const filterName = filterNames[this.fileTypeFilter] || `Unknown`;
-            // Prompt.print(`Sent file chunk: files ${chunkStartIndex}-${chunkEndIndex - 1} (${chunkEndIndex - chunkStartIndex} files), total: ${fileCount}, filter: ${filterName}`);
+
+            this.frameTransport.send({
+                t: 'cmd',
+                c: 'catalog_update',
+                s: 0,  // no response needed
+                offset: chunkStartIndex,
+                total: fileCount,
+                filter: this.fileTypeFilter,
+                d: chunkBuffer
+            }, FrameTransport.PRI_NORMAL);
         } catch (err) {
             Prompt.print(`Error sending file chunk: ${err.message}`);
         }
@@ -481,6 +758,14 @@ class PicoConnection {
         }
         this.hddImage = null;
 
+        if (this._heartbeatInterval) {
+            clearInterval(this._heartbeatInterval);
+            this._heartbeatInterval = null;
+        }
+        if (this.frameTransport) {
+            this.frameTransport.close();
+            this.frameTransport = null;
+        }
         if (this.tcpClient) {
             this.tcpClient.end();
             this.tcpClient = null;
@@ -515,7 +800,7 @@ class PicoConnection {
      * Sends updated file chunk to refresh the file list on Pico
      */
     notifyFileListChanged() {
-        if (this.isConnected && this.tcpClient) {
+        if (this.isConnected && this.frameTransport) {
             this._sendFileChunk(0);
         }
     }
@@ -529,11 +814,117 @@ class PicoConnection {
     }
 
     /**
+     * Print accumulated log history and clear it
+     */
+    /**
+     * Request hardware log from Pico via v2 protocol
+     * @returns {Promise<object>} The ack message with hw log data
+     */
+    async requestHwLog() {
+        if (!this.frameTransport) {
+            throw new Error('v2 protocol not connected');
+        }
+        return this.frameTransport.sendCommand('hw_log');
+    }
+
+    /**
+     * Boot Pico back to launcher via v2 protocol
+     * @returns {Promise<object>} The ack message with ok:true/false
+     */
+    async bootToLauncher() {
+        if (!this.frameTransport) {
+            throw new Error('v2 protocol not connected');
+        }
+        return this.frameTransport.sendCommand('boot', {}, FrameTransport.PRI_NORMAL, 10000);
+    }
+
+    /**
+     * Request a memory dump from Pico via v2 protocol.
+     * Sends the command, then collects data blocks until complete.
+     * @param {string} type - Dump type: 'dump_bk4x', 'dump_bios', 'dump_disk'
+     * @param {Function} [onProgress] - Optional progress callback(received, total)
+     * @returns {Promise<Buffer>} The received data
+     */
+    async requestDump(type, onProgress = null) {
+        if (!this.frameTransport) {
+            throw new Error('v2 protocol not connected');
+        }
+
+        return new Promise((resolve, reject) => {
+            let totalSize = 0;
+            let received = 0;
+            const chunks = [];
+            let handler = null;
+            let timeout = null;
+
+            const cleanup = () => {
+                if (handler) this.frameTransport.removeListener('message', handler);
+                if (timeout) clearTimeout(timeout);
+            };
+
+            handler = (msg) => {
+                if (msg.t === 'cmd' && msg.c === type) {
+                    // Initial response with size info
+                    totalSize = msg.size || 0;
+                    if (onProgress) onProgress(0, totalSize);
+                } else if (msg.t === 'data' && msg.c === type) {
+                    if (msg.d && Buffer.isBuffer(msg.d)) {
+                        chunks.push(msg.d);
+                        received += msg.d.length;
+                        if (onProgress) onProgress(received, totalSize);
+                    }
+                    if (totalSize > 0 && received >= totalSize) {
+                        cleanup();
+                        resolve(Buffer.concat(chunks).subarray(0, totalSize));
+                    }
+                    // Reset timeout on each block
+                    if (timeout) clearTimeout(timeout);
+                    timeout = setTimeout(() => {
+                        cleanup();
+                        reject(new Error(`${type} timed out after receiving ${received}/${totalSize} bytes`));
+                    }, 10000);
+                }
+            };
+
+            this.frameTransport.on('message', handler);
+
+            // Send the command — sendCommand expects an ack but dump commands
+            // don't send a standard ack, they stream data instead.
+            // So we send it as a raw message, not via sendCommand.
+            this.frameTransport.send({
+                t: 'cmd',
+                c: type,
+                s: 0
+            }, FrameTransport.PRI_NORMAL);
+
+            // Overall timeout
+            timeout = setTimeout(() => {
+                cleanup();
+                reject(new Error(`${type} timed out`));
+            }, 30000);
+        });
+    }
+
+    printLog() {
+        if (this.logHistory.length === 0) {
+            console.log('No log entries.');
+        } else {
+            for (const entry of this.logHistory) {
+                const ts = entry.ts !== undefined ? `[${String(entry.ts).padStart(10, '0')}] ` : '';
+                console.log(`${ts}${entry.msg}`);
+            }
+            console.log(`--- ${this.logHistory.length} log entries ---`);
+            this.logHistory = [];
+        }
+        Prompt.show();
+    }
+
+    /**
      * Get the current connection status
      * @returns {boolean}
      */
     get connected() {
-        return this.isConnected && this.tcpClient !== null;
+        return this.isConnected && this.frameTransport !== null;
     }
 
     /**
@@ -616,6 +1007,61 @@ class PicoConnection {
 
     /**
      * Send a file to the SVI based on file type
+     * @private
+     * @param {string} filePath - Full path to the file
+     * @param {string} fileType - Type of file (rom, disk, cas, savestate)
+     */
+    async _sendFileV2(filePath, fileType) {
+        const RomLoader = require('../commands/RomLoader');
+        const DiskLoader = require('../commands/DiskLoader');
+        const CasLoader = require('../commands/CasLoader');
+        const SaveStateLoader = require('../commands/SaveStateLoader');
+        if (!this.frameTransport) return;
+
+        const normalizedType = fileType.startsWith('disk') ? 'disk' : fileType;
+
+        // Convert double-sided 40-track disk layouts from interleaved to sequential
+        if (fileType === 'disk-basic-40ds' || fileType === 'disk-cpm-40ds') {
+            const fs = require('fs');
+            const data = this._convertDisk40dsLayout(fs.readFileSync(filePath));
+            const tmpPath = filePath + '.tmp';
+            fs.writeFileSync(tmpPath, data);
+            filePath = tmpPath;
+        }
+
+        try {
+            if (normalizedType === 'rom') {
+                await RomLoader.load(filePath, this.frameTransport,
+                    () => Prompt.print('ROM load complete'),
+                    (err) => Prompt.print(`ROM load error: ${err.message}`)
+                );
+            } else if (normalizedType === 'disk') {
+                await DiskLoader.load(filePath, this.frameTransport,
+                    () => Prompt.print('Disk load complete'),
+                    (err) => Prompt.print(`Disk load error: ${err.message}`)
+                );
+            } else if (normalizedType === 'cassette') {
+                await CasLoader.load(filePath, this.frameTransport,
+                    () => Prompt.print('Tape load complete'),
+                    (err) => Prompt.print(`Tape load error: ${err.message}`)
+                );
+            } else if (normalizedType === 'savestate') {
+                await SaveStateLoader.load(filePath, this.frameTransport,
+                    () => Prompt.print('Save state load complete'),
+                    (err) => Prompt.print(`Save state load error: ${err.message}`)
+                );
+            } else if (normalizedType === 'hdd') {
+                await this.loadHddImage(filePath);
+            } else {
+                Prompt.print(`File type "${fileType}" not yet supported on v2`);
+            }
+        } catch (err) {
+            Prompt.print(`Error sending file: ${err.message}`);
+        }
+    }
+
+    /**
+     * Send a file to the SVI based on file type (v1 protocol)
      * @private
      * @param {string} filePath - Full path to the file
      * @param {string} fileType - Type of file (rom, disk, cas, savestate)

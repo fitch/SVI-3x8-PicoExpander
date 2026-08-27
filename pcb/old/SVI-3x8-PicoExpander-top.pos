@@ -1,0 +1,19 @@
+### Footprint positions - created on 2026-05-05T20:28:46+0300 ###
+### Printed by KiCad version 9.0.1
+## Unit = mm, Angle = deg.
+## Side : top
+# Ref     Val                    Package                                                PosX       PosY       Rot  Side
+A1        Raspberry_Pi_Pico_2_W  RaspberryPi_Pico_Common_Unspecified                 98.5700  -111.8900   90.0000  top
+C1        0.1μF                 C_Disc_D3.0mm_W1.6mm_P2.50mm                       218.9000  -109.5000   90.0000  top
+C2        0.1μF                 C_Disc_D3.0mm_W1.6mm_P2.50mm                       186.9000  -120.5000   90.0000  top
+C3        0.1μF                 C_Disc_D3.0mm_W1.6mm_P2.50mm                       186.9000  -109.5000   90.0000  top
+C4        0.1μF                 C_Disc_D3.0mm_W1.6mm_P2.50mm                       102.4200  -134.0000   90.0000  top
+C5        0.1μF                 C_Disc_D3.0mm_W1.6mm_P2.50mm                       218.9000  -120.5000   90.0000  top
+R1        10kΩ                  R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal   137.6900  -107.0000    0.0000  top
+SW1       Reset                  SW_PUSH_1P1T_6x3.5mm_H4.3_APEM_MJTP1243            144.7500  -103.5000  180.0000  top
+U1        74LVC245A              DIP-20_W7.62mm                                     214.3200  -101.8800  -90.0000  top
+U2        74LVC245A              DIP-20_W7.62mm                                     182.3200  -113.0000  -90.0000  top
+U3        74HC14                 DIP-14_W7.62mm                                      98.0000  -126.5000  -90.0000  top
+U4        74LVC245A              DIP-20_W7.62mm                                     182.3200  -101.8800  -90.0000  top
+U5        74LVC245A              DIP-20_W7.62mm                                     214.3200  -113.0000  -90.0000  top
+## End

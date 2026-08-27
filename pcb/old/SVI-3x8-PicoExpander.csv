@@ -1,0 +1,8 @@
+"Id";"Designator";"Footprint";"Quantity";"Designation";"Supplier and ref";
+1;"U4,U2,U1,U5";"DIP-20_W7.62mm";4;"74LVC245A";;;
+2;"C4,C2,C3,C5,C1";"C_Disc_D3.0mm_W1.6mm_P2.50mm";5;"0.1μF";;;
+3;"U3";"DIP-14_W7.62mm";1;"74HC14";;;
+4;"SW1";"SW_PUSH_1P1T_6x3.5mm_H4.3_APEM_MJTP1243";1;"Reset";;;
+5;"A1";"RaspberryPi_Pico_Common_Unspecified";1;"Raspberry Pi Pico 2 W";;;
+6;"R1";"R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal";1;"10kΩ";;;
+7;"J1";"DIP-50_EXPANDER_BUS";1;"SVI-3x8 expander bus edge connector";;;

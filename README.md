@@ -19,7 +19,7 @@ The device emulates (when plugged into the SVI-3x8 expansion port):
 
 ## Limitations
 
-Limitations of the current software (1.4.3):
+Limitations of the current software (1.4.4):
  - Supports only one disk drive, two-disk drive support coming up
 
 ## The project
@@ -104,7 +104,7 @@ For detailed documentation, see the `doc/` directory:
 
 ## Release Notes
 
-See the latest changes in [v1.4.3 release notes](release/release-notes-1.4.3.md).
+See the latest changes in [v1.4.4 release notes](release/release-notes-1.4.4.md).
 
 ## License
 

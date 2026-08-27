@@ -1,101 +1,64 @@
 const fs = require('fs');
-const NetworkDiscovery = require('../network/NetworkDiscovery');
-const TcpClient = require('../network/TcpClient');
-const { createCommandBuffer, padToChunks } = require('../network/ProtocolUtils');
-const { CHUNK_SIZE } = require('../utils/networkConstants');
+const { padToChunks } = require('../network/ProtocolUtils');
+const { PRI_BULK } = require('../network/FrameTransport');
+const Prompt = require('../ui/Prompt');
+const ProgressBar = require('../utils/ProgressBar');
 
-/**
- * CasLoader handles CAS (cassette tape) file uploads to the SVI-3x8 PicoExpander
- */
+const BLOCK_SIZE = 16384;
+
+function crc16(data) {
+    let crc = 0xFFFF;
+    for (let i = 0; i < data.length; i++) {
+        crc ^= data[i] << 8;
+        for (let j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+        }
+    }
+    return crc;
+}
+
 class CasLoader {
-    /**
-     * Load a CAS file to the device
-     * @param {string} filename - Path to CAS file
-     * @param {Object} picoAddress - Optional. If provided, uses existing connection instead of UDP discovery
-     * @param {Function} onComplete - Optional callback when operation completes
-     * @param {Function} onError - Optional callback on error
-     */
-    static async load(filename, picoAddress = null, onComplete = null, onError = null) {
-        let casData = fs.readFileSync(filename);
-        
-        if (casData.length > 524288) {
-            console.error("Max supported CAS size is 524288 bytes");
-            if (picoAddress) {
-                // Interactive mode - don't exit
-                if (onError) onError(new Error('CAS file too large'));
-                return;
+    static async load(filename, transport, onComplete = null, onError = null) {
+        try {
+            let casData = fs.readFileSync(filename);
+
+            if (casData.length > 524288) {
+                throw new Error(`Max supported CAS size is 524288 bytes, got ${casData.length}`);
             }
-            process.exit(1);
-        }
-        
-        let remote = picoAddress;
-        if (!remote) {
-            const discovery = new NetworkDiscovery();
-            remote = await discovery.waitForHandshake();
-        }
-        
-        const client = new TcpClient(remote);
-        await client.connect();
-        
-        console.log("Connected. Sending tape upload command...");
-        client.write(createCommandBuffer("LT", casData.length, CHUNK_SIZE));
 
-        // Pad to chunk boundaries
-        casData = padToChunks(casData, CHUNK_SIZE);
+            // Pad to chunk boundaries
+            casData = padToChunks(casData, BLOCK_SIZE);
 
-        let offset = 0;
-        let state = 'waiting_for_OK';
+            const expectedCrc = crc16(casData);
 
-        client.onData(() => {
-            try {
-                const response = client.readCommand();
-                if (!response) return;
+            await transport.sendCommand('file_begin', {
+                type: 'cassette',
+                size: casData.length,
+                block_size: BLOCK_SIZE
+            }, PRI_BULK);
 
-                if (state === 'waiting_for_OK' && response.cmd === 'OK') {
-                    console.log("Received OK. Sending first chunk...");
-                    const chunk = casData.subarray(offset, offset + CHUNK_SIZE);
-                    client.write(chunk);
-                    console.log(`Sent chunk at offset ${offset}`);
-                    offset += CHUNK_SIZE;
-                    if (offset >= casData.length) {
-                        state = 'waiting_for_FI';
-                    } else {
-                        state = 'waiting_for_RD';
-                    }
-                } else if (state === 'waiting_for_OK' && response.cmd === 'EC') {
-                    console.error("Tape load failed - another command is in progress. Please try again.");
-                    client.end();
-                    if (onError) onError(new Error('Command in progress'));
-                } else if (state === 'waiting_for_RD' && response.cmd === 'RD') {
-                    const chunk = casData.subarray(offset, offset + CHUNK_SIZE);
-                    client.write(chunk);
-                    console.log(`Sent chunk at offset ${offset}`);
-                    offset += CHUNK_SIZE;
-                    if (offset >= casData.length) {
-                        state = 'waiting_for_FI';
-                    }
-                } else if (state === 'waiting_for_FI' && response.cmd === 'FI') {
-                    console.log("Upload finished successfully. Closing.");
-                    client.end();
-                } else {
-                    console.error(`Unexpected command '${response.cmd}' in state '${state}'`);
-                    client.end();
+            const totalBlocks = Math.ceil(casData.length / BLOCK_SIZE);
+            const progressBar = new ProgressBar(casData.length, 'Sending');
+            let lastAck;
+            for (let block = 0; block < totalBlocks; block++) {
+                const offset = block * BLOCK_SIZE;
+                const chunk = casData.subarray(offset, offset + BLOCK_SIZE);
+                lastAck = await transport.sendData(block, chunk);
+                progressBar.update(offset + chunk.length);
+            }
+            progressBar.complete();
+
+            if (lastAck && lastAck.crc !== undefined) {
+                if (lastAck.crc !== expectedCrc) {
+                    throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16).padStart(4, '0')}, got 0x${lastAck.crc.toString(16).padStart(4, '0')}`);
                 }
-            } catch (err) {
-                console.error(err.message);
-                client.end();
+                Prompt.print(`Tape CRC: 0x${expectedCrc.toString(16).padStart(4, '0')} OK`, false);
             }
-        });
 
-        client.onClose(() => {
-            console.log('TCP connection closed');
             if (onComplete) onComplete();
-        });
-
-        client.onError((err) => {
-            console.error(`TCP Error: ${err.message}`);
+        } catch (err) {
             if (onError) onError(err);
-        });
+        }
     }
 }
 

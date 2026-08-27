@@ -215,7 +215,6 @@ Commands are sent by writing to port 0x13. Data is exchanged via port 0x14.
 | 0x07 | Dump Disk               | Configuration | Capture real disk contents into Pico     |
 | 0x10 | Boot with Cassette      | Boot          | Boot BIOS with cassette emulation        |
 | 0x11 | Boot Normal             | Boot          | Boot normal BIOS                         |
-| 0x12 | Dump Log                | Debug         | Dump Pico text log                       |
 | 0x13 | Erase Credentials       | Configuration | Erase stored Wi-Fi credentials           |
 | 0x14 | Clear Hardware Log      | Debug         | Clear Pico hardware log                  |
 | 0x20 | Get File Count          | File Server   | Get count of available files             |
@@ -513,10 +512,6 @@ OUT 0x14, <filter>         ; Filter value (see 0x20 filter table)
 
 ### Debug Commands
 
-#### 0x12 - Dump Pico Text Log
-
-Outputs the Pico's text log for debugging purposes.
-
 #### 0x14 - Clear Pico Hardware Log
 
 Clears the Pico's hardware debug log.
@@ -542,7 +537,6 @@ State codes returned when reading port 0x13.
 | 108 | 0x6C | ROM ready               |
 | 109 | 0x6D | Receiving disk          |
 | 110 | 0x6E | Disk ready              |
-| 111 | 0x6F | Dumping log             |
 | 112 | 0x70 | Client disconnected     |
 | 113 | 0x71 | Receiving tape          |
 | 114 | 0x72 | Tape ready              |
@@ -563,7 +557,6 @@ State codes returned when reading port 0x13.
 |-----|------|----------------|
 | 230 | 0xE6 | Wi-Fi bad auth |
 | 231 | 0xE7 | Wi-Fi timeout  |
-| 251 | 0xFB | Dump log       |
 | 252 | 0xFC | Boot fail      |
 | 253 | 0xFD | Memory error   |
 | 254 | 0xFE | Error          |

@@ -77,6 +77,11 @@ class NetworkDiscovery {
                 if (resolved) return;
                 resolved = true;
                 if (timeoutHandle) clearTimeout(timeoutHandle);
+                // Release the socket so the port (UDP 4243) isn't leaked. A failed
+                // bind (EADDRINUSE) leaves the socket bound-but-unusable; without
+                // this close, the next reconnect attempt can't rebind and the whole
+                // reconnect loop spirals into EADDRINUSE forever.
+                try { this.udpServer.close(); } catch (e) { /* already closed */ }
                 // Don't reject on close error - just resolve null
                 if (err.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') {
                     resolve(null);
@@ -144,6 +149,7 @@ class NetworkDiscovery {
 
             this.udpServer.on('error', (err) => {
                 if (discoveryTimeout) clearTimeout(discoveryTimeout);
+                try { this.udpServer.close(); } catch (e) { /* already closed */ }
                 reject(err);
             });
 
@@ -182,7 +188,7 @@ class NetworkDiscovery {
 
     close() {
         if (this.udpServer) {
-            this.udpServer.close();
+            try { this.udpServer.close(); } catch (e) { /* already closed */ }
             this.udpServer = null;
         }
     }

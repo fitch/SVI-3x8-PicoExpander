@@ -33,8 +33,8 @@ fi
 echo "SSID: [$ssid]"
 echo "Password: [$password]"
 
-# Write magic numbers
-printf '\xDE\xAD\xBE\xEF' > "$OUTPUT_BIN"
+# Write magic number 0xDEADBEEF
+printf '\xEF\xBE\xAD\xDE' > "$OUTPUT_BIN"
 
 # Write SSID with explicit zero-padding
 printf '%s' "$ssid" | head -c 32 >> "$OUTPUT_BIN"

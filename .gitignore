@@ -2,6 +2,7 @@ build
 pico/bootrom
 pico/c/disk.h
 pico/c/bootrom.h
+pico/.cache
 rom/build
 rom/*.lst
 rom/*.sym
@@ -9,10 +10,10 @@ rom/asm/*.lst
 rom/asm/*.sym
 rom/release
 rom/bin
-pcb/SVI-3x8-PicoExpander-backups
-pcb/fp-info-cache
-pcb/*.zip
-pcb/*.lck
+pcb/**/SVI-3x8-PicoExpander-backups/
+pcb/**/fp-info-cache
+pcb/**/*.lck
+pcb/**/_autosave*
 wifi-credentials.config
 release/wifi-credentials.bin
 images

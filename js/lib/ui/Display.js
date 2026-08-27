@@ -146,20 +146,19 @@ class Display {
         console.log('  S - Search files (by name, metadata, or contents)');
         console.log('');
         console.log('  1 - Load ROM file');
-        console.log('  3 - Save BK4X RAM4 data');
         console.log('  4 - Load Disk image');
         console.log('  5 - Load CAS tape file');
+        console.log('  M - Mount HDD image');
+        if (server && server.picoConnection && server.picoConnection.hddImage) {
+            console.log('  U - Unmount HDD image');
+        }
         console.log('  6 - Boot to Launcher');
         console.log('  7 - Save BIOS data');
         console.log('  8 - Save machine state (save state capture)');
         console.log('  9 - Save Disk image');
         console.log('');
-        if (server && server.picoConnection && server.picoConnection.hddImage) {
-            console.log('  U - Unload HDD image');
-        }
-        console.log('  L - Request both logs from PicoExpander');
-        console.log('  T - Request text log from PicoExpander');
-        console.log('  W - Request hardware log from PicoExpander');
+        console.log('  T - Show text log');
+        console.log('  W - Request hardware log');
         console.log('  H - Show this help message');
         console.log('  Q - Quit server');
 

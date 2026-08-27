@@ -58,7 +58,7 @@ class LogAnalyzer {
      */
     formatTimestamp(ts) {
         const s = ts.toString();
-        const padded = s.padStart(9, '0');
+        const padded = s.padStart(10, '0');
         return `[${padded}]`;
     }
 

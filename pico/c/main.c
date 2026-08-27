@@ -16,6 +16,8 @@
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
 #include "wifi.h"
+#include "frame.h"
+#include "cmd.h"
 #include "pico/cyw43_arch.h"
 #include "pico/cyw43_driver.h"
 
@@ -43,6 +45,12 @@ void error(int numblink) {
 
 extern const uint8_t __persisted_config[PERSISTED_CONFIG_SIZE];
 
+// Staging buffer for the persisted config sector. Must NOT be a local: core 0's stack
+// starts at the bottom of SCRATCH_Y, so a 4 KB frame overflows into SCRATCH_X, which is
+// core 1's stack — silently corrupting the bus emulation. Shared by store_config() and
+// erase_wifi_credentials(); they never run concurrently.
+static uint8_t sector_buf[PERSISTED_CONFIG_SIZE];
+
 int __not_in_flash_func(fetch_config)(void) {
     const uint8_t *stored_config = &__persisted_config[4 + SSID_MAX_LENGTH + PASSWORD_MAX_LENGTH];
     if (memcmp(stored_config, "FLASH", 5) == 0) {
@@ -67,7 +75,7 @@ int __not_in_flash_func(fetch_config)(void) {
 }
 
 int __not_in_flash_func(store_config)(void) {
-    uint8_t sector_buf[PERSISTED_CONFIG_SIZE] = {0};
+    memset(sector_buf, 0, sizeof(sector_buf));
 
     *(uint32_t *)sector_buf = CONFIG_HEADER_MAGIC;
     strncpy((char *)&sector_buf[4], (void *)SSID, SSID_MAX_LENGTH);
@@ -84,7 +92,7 @@ int __not_in_flash_func(store_config)(void) {
 }
 
 int __not_in_flash_func(erase_wifi_credentials)(void) {
-    uint8_t sector_buf[PERSISTED_CONFIG_SIZE] = {0};
+    memset(sector_buf, 0, sizeof(sector_buf));
     memcpy(&sector_buf[4 + SSID_MAX_LENGTH + PASSWORD_MAX_LENGTH], (void *)SVI_CONFIG, SVI_CONFIG_SIZE);
 
     uint32_t ints = save_and_disable_interrupts();
@@ -113,6 +121,7 @@ int doorbell_hdd;
 uint8_t disk_flash_buffer[8192]; // Shared buffer: track flash writes AND dump disk double-buffer (2 × 4096)
 
 bool return_to_wifi_credentials = false;
+static volatile bool file_server_request_pending = false;
 
 void __not_in_flash_func(core0_doorbell)() {
     // FIXME: The doorbell handler core0_doorbell() runs as an interrupt handler (IRQ). But tcp_write() and tcp_output() are lwIP functions that must run in the main lwIP context (not from an ISR). Calling them from an ISR can corrupt lwIP's internal state
@@ -187,20 +196,7 @@ void __not_in_flash_func(core0_doorbell)() {
         doorbell_parameter_media_control_command = MEDIA_CONTROL_NONE;
 
     } else if (multicore_doorbell_is_set_current_core(doorbell_file_server_request)) {
-        switch (doorbell_parameter_file_server_request_type) {
-            case FILE_SERVER_REQUEST_FILE_CHUNK:
-                send_file_chunk_request();
-                break;
-            case FILE_SERVER_REQUEST_FILE_SEND:
-                send_file_send_request();
-                break;
-            case FILE_SERVER_REQUEST_SAVE_STATE:
-                send_save_state_request();
-                break;
-            case FILE_SERVER_REQUEST_SET_FILTER:
-                send_set_filter_request();
-                break;
-        }
+        file_server_request_pending = true;
         multicore_doorbell_clear_current_core(doorbell_file_server_request);
     } else if (multicore_doorbell_is_set_current_core(doorbell_save_config)) {
         store_config();
@@ -217,78 +213,14 @@ void __not_in_flash_func(core0_doorbell)() {
         dump_disk_flash_offset += DUMP_DISK_SECTOR_SIZE;
         multicore_doorbell_clear_current_core(doorbell_flash_dump_disk);
     } else if (multicore_doorbell_is_set_current_core(doorbell_hdd)) {
-        // HDD sector read/write request — flag only, TCP calls happen in main loop
         hdd_request_pending = true;
         multicore_doorbell_clear_current_core(doorbell_hdd);
     }
 }
 
-typedef struct {
-    char ssid[33];
-    int8_t rssi;
-    uint8_t auth_mode;
-} wifi_scan_result_t;
-
-#define MAX_SCAN_RESULTS 32
-
-static int found_ssid_auth_mode = -1;  // -1 means not found
-static const char *target_ssid = NULL;
-static volatile bool ssid_found = false;
-
-static int scan_callback(void *env, const cyw43_ev_scan_result_t *result) {
-    (void)env;
-    if (result && target_ssid && !ssid_found) {
-        if (result->ssid_len > 0 && strcmp((const char *)result->ssid, target_ssid) == 0) {
-            found_ssid_auth_mode = result->auth_mode;
-            ssid_found = true;
-            log_message("Found target SSID '%s' (auth_mode=%d, rssi=%d)", result->ssid, result->auth_mode, result->rssi);
-        }
-    }
-    return 0;
-}
-
-void wifi_init(void) {
-    if (cyw43_arch_init() != PICO_OK) {
-        pico_state = PICO_STATE_WIFI_ERROR;
-        error(5);
-    }
-}
-
-void perform_wifi_scan(const char *ssid_to_find) {
-    cyw43_wifi_scan_options_t scan_options = {0};
-
-    target_ssid = ssid_to_find;
-    ssid_found = false;
-    found_ssid_auth_mode = -1;
-
-    for (int round = 0; round < 3 && !ssid_found; round++) {
-        log_message("Starting Wi-Fi scan round %d for SSID '%s'...", round + 1, ssid_to_find);
-
-        int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_callback);
-        if (err) {
-            log_message("Wi-Fi scan failed to start: %d", err);
-            continue;
-        }
-
-        absolute_time_t timeout = make_timeout_time_ms(10000);
-        while (cyw43_wifi_scan_active(&cyw43_state) && !time_reached(timeout) && !ssid_found) {
-            sleep_ms(10);
-        }
-
-        if (!ssid_found && cyw43_wifi_scan_active(&cyw43_state)) {
-            log_message("Wi-Fi scan round %d timed out.", round + 1);
-        }
-    }
-
-    if (!ssid_found) {
-        log_message("Target SSID '%s' not found after scanning.", ssid_to_find);
-    }
-
-    target_ssid = NULL;
-}
-
 int __no_inline_not_in_flash_func(main)() {
     boot_time_us = HW_TIMESTAMP;
+    frame_init();
     log_message("Booting...");
 
     // Generate unique visible ASCII characters from Pico's flash serial number
@@ -379,10 +311,12 @@ int __no_inline_not_in_flash_func(main)() {
     wifi_init();
     stdio_usb_init();
     /*
+    // FIXME: Warning, don't leave this to production as the core 0 jams here if USB is not connected.
     while (!stdio_usb_connected()) {
         sleep_ms(100);
     }
     */
+    
     pico_set_led(true);
 
     log_message("SVI-3x8 PicoExpander version %s (%s)", VERSION, BUILD_DATE);
@@ -409,7 +343,7 @@ rewait_for_wifi_credentials:
     log_message("Starting blocking Wi-Fi scan...");
     network_status = NETWORK_STATUS_CONNECTING;
     cyw43_arch_enable_sta_mode();
-    perform_wifi_scan((char *)SSID);
+    int found_ssid_auth_mode = wifi_scan((char *)SSID);
 
     log_message("Connecting to WiFi SSID [%s]...", SSID);
     uint32_t auth = CYW43_AUTH_WPA2_AES_PSK;
@@ -466,7 +400,6 @@ rewait_for_wifi_credentials:
                 blink_count = 4;
                 break;
         }
-        pico_state = PICO_STATE_DUMP_LOG;
         erase_wifi_credentials();
         error(blink_count);
     }
@@ -475,8 +408,13 @@ rewait_for_wifi_credentials:
 
     pico_state = PICO_STATE_WIFI_CONNECTED;
     log_message("WiFi connected to access point.");
+
+    if (cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM) == 0) {
+        log_message("WiFi power-save disabled (PM=NONE).");
+    }
+
     wait_for_ip();
-    tcp_server_setup();
+    frame_server_setup();
 
     last_check_ts = HW_TIMESTAMP;
     bool led_on = true;
@@ -501,7 +439,7 @@ rewait_for_wifi_credentials:
         if ((uint32_t)(now - last_check_ts) >= CHECK_INTERVAL_US) {
             last_check_ts = now;
 
-            if (!client_connected) {
+            if (!frame_is_connected()) {
                 led_on = !led_on;
                 pico_set_led(led_on);
 
@@ -517,13 +455,34 @@ rewait_for_wifi_credentials:
         if (hdd_request_pending) {
             hdd_request_pending = false;
             if (hdd_op_type == HDD_OP_READ) {
-                send_hdd_read_request(hdd_request_lba, 0, 256);
+                cmd_hdd_read(hdd_request_lba);
             } else {
-                send_hdd_write_request(hdd_request_lba, 0, 256, HDD_WRITE_SECTOR);
+                cmd_hdd_write(hdd_request_lba);
+            }
+        }
+
+        if (file_server_request_pending) {
+            file_server_request_pending = false;
+            switch (doorbell_parameter_file_server_request_type) {
+                case FILE_SERVER_REQUEST_FILE_CHUNK:
+                    cmd_send_catalog_get(file_index_request);
+                    break;
+                case FILE_SERVER_REQUEST_FILE_SEND:
+                    cmd_send_file_get(file_index_request);
+                    break;
+                case FILE_SERVER_REQUEST_SAVE_STATE:
+                    cmd_send_save_state();
+                    break;
+                case FILE_SERVER_REQUEST_SET_FILTER:
+                    cmd_send_catalog_filter(file_type_filter);
+                    break;
             }
         }
 
         cyw43_arch_poll();
+        frame_queue_drain();
+        cmd_save_state_poll();
+        cmd_dump_poll();
         sleep_ms(1);
     }
 }

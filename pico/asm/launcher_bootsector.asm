@@ -38,8 +38,9 @@ RAM_START:
     ld a, PE_COMMAND_MEDIA_CONTROL
     out (PE_COMMAND_PORT), a
 
-    ld a, 0b00000100            ; Eject cartridge (this code)
-    out (PE_DATA_PORT), a
+    ld a, 0b00010000            ; Restore captured 32 kB cartridge: copy upper ROM_CARTRIDGE half
+    out (PE_DATA_PORT), a       ; (BK12, the capture) down to the lower half (BK11 slot).
+                                ; With no cart captured the upper half is 0xff, so the lower half is cleared.
 
     jp 3                        ; Entry point for bootloader in mainram.asm
 RAM_END:

@@ -57,6 +57,22 @@
 #define SAVE_STATE_FILENAME_MAX_LENGTH 256
 #define SVI_CONFIG_SIZE 16
 
+// Memory bank sizes
+#define BANK_SIZE 32768
+#define RAM4_DUMP_START 0xB000
+#define RAM4_DUMP_END 0xF040
+#define RAM4_DUMP_SIZE (RAM4_DUMP_END - RAM4_DUMP_START) // 16448 bytes
+
+// Bank configuration bit flags (for save states)
+#define BANK_CONFIG_BK01 0x01  // Bit 0: BIOS ROM (always excluded)
+#define BANK_CONFIG_BK02 0x02  // Bit 1: RAM0
+#define BANK_CONFIG_BK11 0x04  // Bit 2: ROM_CARTRIDGE lower
+#define BANK_CONFIG_BK12 0x08  // Bit 3: ROM_CARTRIDGE upper
+#define BANK_CONFIG_BK21 0x10  // Bit 4: RAM2 lower
+#define BANK_CONFIG_BK22 0x20  // Bit 5: RAM2 upper
+#define BANK_CONFIG_BK31 0x40  // Bit 6: RAM3 lower
+#define BANK_CONFIG_BK32 0x80  // Bit 7: RAM3 upper
+
 #define PICO_ENABLED 255
 #define PICO_DISABLED 0
 typedef enum {
@@ -71,7 +87,6 @@ typedef enum {
     PICO_STATE_ROM_READY = 108,
     PICO_STATE_RECEIVING_DISK = 109,
     PICO_STATE_DISK_READY = 110,
-    PICO_STATE_DUMPING_LOG = 111,
     PICO_STATE_CLIENT_DISCONNECTED = 112,
     PICO_STATE_RECEIVING_TAPE = 113,
     PICO_STATE_TAPE_READY = 114,
@@ -80,6 +95,7 @@ typedef enum {
     PICO_STATE_SENDING_BK4X = 118,
     PICO_STATE_RECEIVING_FILE_CHUNK = 119,
     PICO_STATE_SENDING_SAVE_STATE = 120,
+    PICO_STATE_SAVE_STATE_SENT = 125,
     PICO_STATE_SENDING_BIOS = 121,
     PICO_STATE_SENDING_DISK = 124,
     PICO_STATE_RECEIVING_SAVE_STATE = 122,
@@ -89,7 +105,6 @@ typedef enum {
     PICO_STATE_WIFI_BAD_AUTH = 230,
     PICO_STATE_WIFI_TIMEOUT = 231,
     PICO_STATE_WIFI_RESET = 232,
-    PICO_STATE_DUMP_LOG = 251,
     PICO_STATE_BOOT_FAIL = 252,
     PICO_STATE_MEMORY_ERROR = 253,
     PICO_STATE_ERROR = 254,
@@ -152,7 +167,6 @@ typedef enum {
     COMMAND_DUMP_DISK = 0x07,
     COMMAND_PATCH_BIOS = 0x10,
     COMMAND_REVERT_BIOS = 0x11,
-    COMMAND_DUMP_LOG = 0x12,
     COMMAND_ERASE_CREDENTIALS = 0x13,
     COMMAND_CLEAR_HARDWARE_LOG = 0x14,
     COMMAND_GET_FILE_COUNT = 0x20,
@@ -209,7 +223,6 @@ extern volatile uint32_t tape_index;
 extern volatile uint32_t tape_size;
 
 extern volatile uint8_t ROM_CARTRIDGE[];
-extern volatile uint8_t BK11[];
 extern volatile uint8_t BIOS[];
 extern volatile uint8_t RAM0[];
 extern volatile uint8_t RAM2[];

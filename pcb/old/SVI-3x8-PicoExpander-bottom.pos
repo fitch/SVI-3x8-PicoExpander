@@ -1,0 +1,7 @@
+### Footprint positions - created on 2026-05-05T20:28:46+0300 ###
+### Printed by KiCad version 9.0.1
+## Unit = mm, Angle = deg.
+## Side : bottom
+# Ref     Val                                  Package                   PosX       PosY       Rot  Side
+J1        SVI-3x8_expander_bus_edge_connector  DIP-50_EXPANDER_BUS   150.5600  -127.5400  180.0000  bottom
+## End
