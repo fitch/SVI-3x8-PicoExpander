@@ -21,6 +21,9 @@ endif()
 # ====================================================================================
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
+# Fetch SDK of version sdkVersion from Git (not latest one, e.g. 2.3.0 has breaking bugs atm)
+set(PICO_SDK_FETCH_FROM_GIT_TAG ${sdkVersion})
+
 include(pico_sdk_import.cmake)
 
 project(svi-3x8-picoexpander C CXX ASM)

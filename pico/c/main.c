@@ -27,21 +27,15 @@
 
 uint8_t pico_unique_id_chars[2] = {'?', '?'};
 
-void error(int numblink) {
-    while (true) {
-        for (int i = 0; i < numblink; i++) {
-            pico_set_led(true);
-            sleep_ms(600);
-            pico_set_led(false);
-            sleep_ms(500);
-        }
-        sleep_ms(2000);
-    }
-}
-
 #define PERSISTED_CONFIG_SIZE 4096
 #define PERSISTED_CONFIG_OFFSET 0x3FC000
 #define CONFIG_HEADER_MAGIC 0xDEADBEEF
+#define CONFIG_MAGIC_OFFSET 0
+#define SSID_OFFSET (CONFIG_MAGIC_OFFSET + 4)
+#define PASSWORD_OFFSET (SSID_OFFSET + SSID_MAX_LENGTH)
+#define SVI_CONFIG_OFFSET (PASSWORD_OFFSET + PASSWORD_MAX_LENGTH)
+#define WIFI_AUTH_MODE_OFFSET (SVI_CONFIG_OFFSET + SVI_CONFIG_SIZE)
+#define WIFI_AUTH_MODE_INVALID 0xFF
 
 extern const uint8_t __persisted_config[PERSISTED_CONFIG_SIZE];
 
@@ -51,25 +45,30 @@ extern const uint8_t __persisted_config[PERSISTED_CONFIG_SIZE];
 // erase_wifi_credentials(); they never run concurrently.
 static uint8_t sector_buf[PERSISTED_CONFIG_SIZE];
 
+// Wi-Fi auth mode stored to flash to make Wi-Fi to connect faster
+static uint8_t wifi_auth_mode = WIFI_AUTH_MODE_INVALID;
+
 int __not_in_flash_func(fetch_config)(void) {
-    const uint8_t *stored_config = &__persisted_config[4 + SSID_MAX_LENGTH + PASSWORD_MAX_LENGTH];
+    const uint8_t *stored_config = &__persisted_config[SVI_CONFIG_OFFSET];
     if (memcmp(stored_config, "FLASH", 5) == 0) {
         memcpy((void *)SVI_CONFIG, stored_config, SVI_CONFIG_SIZE);
     }
 
-    if (*(uint32_t *)__persisted_config != CONFIG_HEADER_MAGIC) {
+    if (*(uint32_t *)&__persisted_config[CONFIG_MAGIC_OFFSET] != CONFIG_HEADER_MAGIC) {
         return PICO_ERROR_GENERIC;
     }
 
-    memcpy((void *)SSID, &__persisted_config[4], SSID_MAX_LENGTH);
+    memcpy((void *)SSID, &__persisted_config[SSID_OFFSET], SSID_MAX_LENGTH);
     SSID[SSID_MAX_LENGTH] = '\0';
 
-    memcpy((void *)Password, &__persisted_config[4 + SSID_MAX_LENGTH], PASSWORD_MAX_LENGTH);
+    memcpy((void *)Password, &__persisted_config[PASSWORD_OFFSET], PASSWORD_MAX_LENGTH);
     Password[PASSWORD_MAX_LENGTH] = '\0';
 
+    wifi_auth_mode = __persisted_config[WIFI_AUTH_MODE_OFFSET];
 
     log_message("Stored WiFi SSID found: [%s]", SSID);
     log_message("Stored WiFi Password found: [***] (length %zu)", strlen((void *)Password));
+    log_message("Stored WiFi auth mode: %d", wifi_auth_mode);
 
     return PICO_OK;
 }
@@ -77,10 +76,11 @@ int __not_in_flash_func(fetch_config)(void) {
 int __not_in_flash_func(store_config)(void) {
     memset(sector_buf, 0, sizeof(sector_buf));
 
-    *(uint32_t *)sector_buf = CONFIG_HEADER_MAGIC;
-    strncpy((char *)&sector_buf[4], (void *)SSID, SSID_MAX_LENGTH);
-    strncpy((char *)&sector_buf[4 + SSID_MAX_LENGTH], (void *)Password, PASSWORD_MAX_LENGTH);
-    memcpy(&sector_buf[4 + SSID_MAX_LENGTH + PASSWORD_MAX_LENGTH], (void *)SVI_CONFIG, SVI_CONFIG_SIZE);
+    *(uint32_t *)&sector_buf[CONFIG_MAGIC_OFFSET] = CONFIG_HEADER_MAGIC;
+    strncpy((char *)&sector_buf[SSID_OFFSET], (void *)SSID, SSID_MAX_LENGTH);
+    strncpy((char *)&sector_buf[PASSWORD_OFFSET], (void *)Password, PASSWORD_MAX_LENGTH);
+    memcpy(&sector_buf[SVI_CONFIG_OFFSET], (void *)SVI_CONFIG, SVI_CONFIG_SIZE);
+    sector_buf[WIFI_AUTH_MODE_OFFSET] = wifi_auth_mode;
 
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(PERSISTED_CONFIG_OFFSET, sizeof(sector_buf));
@@ -92,8 +92,11 @@ int __not_in_flash_func(store_config)(void) {
 }
 
 int __not_in_flash_func(erase_wifi_credentials)(void) {
+    wifi_auth_mode = WIFI_AUTH_MODE_INVALID;
+
     memset(sector_buf, 0, sizeof(sector_buf));
-    memcpy(&sector_buf[4 + SSID_MAX_LENGTH + PASSWORD_MAX_LENGTH], (void *)SVI_CONFIG, SVI_CONFIG_SIZE);
+    memcpy(&sector_buf[SVI_CONFIG_OFFSET], (void *)SVI_CONFIG, SVI_CONFIG_SIZE);
+    sector_buf[WIFI_AUTH_MODE_OFFSET] = WIFI_AUTH_MODE_INVALID;
 
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(PERSISTED_CONFIG_OFFSET, PERSISTED_CONFIG_SIZE);
@@ -102,6 +105,20 @@ int __not_in_flash_func(erase_wifi_credentials)(void) {
 
     log_message("WiFi credentials erased from flash.");
     return PICO_OK;
+}
+
+// Maps a scan-result auth_mode to the CYW43_AUTH_*
+static uint32_t wifi_auth_mode_to_cyw43_auth(uint8_t mode) {
+    if (mode == 0) {
+        return CYW43_AUTH_OPEN;
+    } else if ((mode & 0x04) && (mode & 0x02)) {
+        return CYW43_AUTH_WPA2_MIXED_PSK;
+    } else if (mode & 0x04) {
+        return CYW43_AUTH_WPA2_AES_PSK;
+    } else if (mode & 0x02) {
+        return CYW43_AUTH_WPA_TKIP_PSK;
+    }
+    return CYW43_AUTH_WPA2_AES_PSK;
 }
 
 #define CHECK_INTERVAL_US 500000  // 500 ms in microseconds
@@ -218,6 +235,32 @@ void __not_in_flash_func(core0_doorbell)() {
     }
 }
 
+// Called when cannot connect to Wi-Fi for any reason. Puts pico into loop waiting for
+// Wi-Fi reset from SVI UI - or reboot in case of which we try to connect to Wi-Fi
+// again.
+//
+// Blinks led n times to signal actual error we encountered - sadly we cannot show exact
+// error on SVI GUI without Z80 asm code changes so this is the best
+// we can do at the moment. We do have pico states PICO_STATE_WIFI_TIMEOUT and
+// PICO_STATE_WIFI_BAD_AUTH but they will put SVI to credentials prompt and we do not
+// want that (timeout could be AP down or poor connectivity, bad auth could be temporary
+// glitch or password could be changed in AP just as well).
+void wifi_error(int numblink, pico_state_t state) {
+    pico_state = PICO_STATE_WIFI_ERROR;
+    while (!return_to_wifi_credentials) {
+        for (int i = 0; i < numblink && !return_to_wifi_credentials; i++) {
+            pico_set_led(true);
+            sleep_ms(600);
+            pico_set_led(false);
+            sleep_ms(500);
+        }
+        if (return_to_wifi_credentials) {
+            break;
+        }
+        sleep_ms(2000);
+    }
+}
+
 int __no_inline_not_in_flash_func(main)() {
     boot_time_us = HW_TIMESTAMP;
     frame_init();
@@ -316,7 +359,7 @@ int __no_inline_not_in_flash_func(main)() {
         sleep_ms(100);
     }
     */
-    
+
     pico_set_led(true);
 
     log_message("SVI-3x8 PicoExpander version %s (%s)", VERSION, BUILD_DATE);
@@ -340,74 +383,73 @@ rewait_for_wifi_credentials:
     pico_set_led(false);
     pico_state = PICO_STATE_WIFI_CONNECTING;
 
-    log_message("Starting blocking Wi-Fi scan...");
     network_status = NETWORK_STATUS_CONNECTING;
     cyw43_arch_enable_sta_mode();
-    int found_ssid_auth_mode = wifi_scan((char *)SSID);
 
-    log_message("Connecting to WiFi SSID [%s]...", SSID);
     uint32_t auth = CYW43_AUTH_WPA2_AES_PSK;
-    switch (found_ssid_auth_mode) {
-        case 0:
-            log_message("SSID auth mode: OPEN");
-            auth = CYW43_AUTH_OPEN;
-            break;
-        case 5:
-            log_message("SSID auth mode: WPA2_AES_PSK");
-            auth = CYW43_AUTH_WPA2_AES_PSK;
-            break;
-        case -1:
+    bool auth_mode_needs_saving = false;
+
+    if (wifi_auth_mode != WIFI_AUTH_MODE_INVALID) {
+        auth = wifi_auth_mode_to_cyw43_auth(wifi_auth_mode);
+        log_message("Using Wi-Fi auth mode from flash (%d), skipping scan.", wifi_auth_mode);
+    } else {
+        log_message("Starting blocking Wi-Fi scan...");
+        int found_ssid_auth_mode = wifi_scan((char *)SSID);
+
+        if (found_ssid_auth_mode == -1) {
             log_message("SSID wasn't found in scanning, defaulting to WPA2_AES_PSK");
-            break;
-        default:
-            log_message("SSID auth mode unknown (%d), defaulting to WPA2_AES_PSK", found_ssid_auth_mode);
-            break;
+        } else {
+            auth = wifi_auth_mode_to_cyw43_auth((uint8_t)found_ssid_auth_mode);
+            log_message("SSID auth mode: %d", found_ssid_auth_mode);
+
+            wifi_auth_mode = (uint8_t)found_ssid_auth_mode;
+            auth_mode_needs_saving = true;
+        }
     }
 
+    log_message("Connecting to WiFi SSID [%s]...", SSID);
     int ret = cyw43_arch_wifi_connect_timeout_ms((char *)SSID, (char *)Password, auth, 30000);
     if (ret != PICO_OK) {
-        int blink_count;
-
         network_status = NETWORK_STATUS_ERROR;
         file_server_status = FILE_SERVER_NOT_CONNECTED;
 
         log_message("WiFi SSID used: [%s]", SSID);
         log_message("WiFi Password used: [%s]", Password); // FIXME: Warning, will expose password
+        log_message("WiFi Auth used: [%d]", auth); 
 
         switch (ret) {
             case PICO_ERROR_TIMEOUT:
                 log_message("WiFi connection timed out.");
-                erase_wifi_credentials();
-
-                pico_state = PICO_STATE_WIFI_TIMEOUT;
-                log_message("Waiting again for WiFi credentials...");
-                goto rewait_for_wifi_credentials; // Retry fetching credentials
+                wifi_error(1, PICO_STATE_WIFI_TIMEOUT);
                 break;
             case PICO_ERROR_BADAUTH:
                 log_message("WiFi connection failed due to bad authentication.");
-                erase_wifi_credentials();
-
-                pico_state = PICO_STATE_WIFI_BAD_AUTH;
-                log_message("Waiting again for WiFi credentials...");
-                goto rewait_for_wifi_credentials; // Retry fetching credentials
+                wifi_error(2, PICO_STATE_WIFI_BAD_AUTH);
                 break;
             case PICO_ERROR_CONNECT_FAILED:
                 log_message("WiFi connection failed.");
-                blink_count = 3;
-                break; 
+                wifi_error(3, PICO_STATE_WIFI_ERROR);
+                break;
             default:
                 log_message("WiFi connection failed with unknown error code: %d", ret);
-                blink_count = 4;
+                wifi_error(4, PICO_STATE_WIFI_ERROR);
                 break;
         }
         erase_wifi_credentials();
-        error(blink_count);
+        return_to_wifi_credentials = false;
+        log_message("Waiting again for WiFi credentials...");
+        goto rewait_for_wifi_credentials;
     }
 
     network_status = NETWORK_STATUS_CONNECTED;
 
     pico_state = PICO_STATE_WIFI_CONNECTED;
     log_message("WiFi connected to access point.");
+
+    if (auth_mode_needs_saving) {
+        store_config();
+        log_message("Wi-Fi auth mode cached to flash (%d).", wifi_auth_mode);
+    }
 
     if (cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM) == 0) {
         log_message("WiFi power-save disabled (PM=NONE).");
