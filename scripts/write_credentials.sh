@@ -12,7 +12,11 @@ fi
 
 if [ "$1" = "--clear" ]; then
     echo "Clearing WiFi credentials in flash memory..."
-    head -c 68 /dev/zero > "$OUTPUT_BIN"
+    head -c 4 /dev/zero > "$OUTPUT_BIN"
+    head -c 32 /dev/zero >> "$OUTPUT_BIN"
+    head -c 63 /dev/zero >> "$OUTPUT_BIN"
+    head -c 16 /dev/zero >> "$OUTPUT_BIN"
+    printf '\xFF' >> "$OUTPUT_BIN"
     picotool load "$OUTPUT_BIN" -f -o $FLASH_OFFSET
     exit 0
 fi
@@ -41,9 +45,15 @@ printf '%s' "$ssid" | head -c 32 >> "$OUTPUT_BIN"
 head -c $((32 - ${#ssid})) /dev/zero >> "$OUTPUT_BIN"
 
 # Write Password with explicit zero-padding
-printf '%s' "$password" | head -c 32 >> "$OUTPUT_BIN"
-head -c $((32 - ${#password})) /dev/zero >> "$OUTPUT_BIN"
+printf '%s' "$password" | head -c 63 >> "$OUTPUT_BIN"
+head -c $((63 - ${#password})) /dev/zero >> "$OUTPUT_BIN"
 
-echo "Created binary file: $OUTPUT_BIN (68 bytes)"
+# Write SVI_CONFIG
+head -c 16 /dev/zero >> "$OUTPUT_BIN"
+
+# Write Wi-Fi auth mode
+printf '\xFF' >> "$OUTPUT_BIN"
+
+echo "Created binary file: $OUTPUT_BIN (116 bytes)"
 
 picotool load "$OUTPUT_BIN" -f -o $FLASH_OFFSET
